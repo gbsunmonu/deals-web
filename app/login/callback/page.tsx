@@ -2,7 +2,8 @@
 export const dynamic = 'force-dynamic';
 import Link from 'next/link';
 import { getServerSupabaseRSC } from '@/lib/supabase';
-import { ensureMerchant } from '@/app/actions/ensure-merchant';
+
+import { ensureMerchantId } from '@/app/actions/ensure-merchant'
 
 export default async function CallbackPage() {
   const supabase = getServerSupabaseRSC();
