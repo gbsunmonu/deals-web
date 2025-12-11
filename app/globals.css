@@ -1,0 +1,10 @@
+/* app/globals.css */
+@import "tailwindcss";
+
+/* app/globals.css (append to the end) */
+.input { @apply border rounded-md px-3 py-2 bg-white; }
+.btn-primary { @apply inline-flex items-center justify-center rounded-md bg-black text-white px-4 py-2 text-sm; }
+
+/* small polish only */
+:root { color-scheme: light; }
+html, body { height: 100%; }

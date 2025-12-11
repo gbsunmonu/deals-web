@@ -1,0 +1,76 @@
+// prisma/schema.prisma
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+enum DiscountType {
+  NONE
+  PERCENT
+}
+
+model Merchant {
+  id          String   @id @default(uuid())
+
+  // Link to Supabase auth user (nullable but unique)
+  userId      String?  @unique
+
+  name        String
+  description String?
+  avatarUrl   String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  category    String?
+  address     String?
+  city        String?
+  phone       String?
+  website     String?
+  lat         Float?
+  lng         Float?
+
+  deals       Deal[]
+}
+
+
+
+
+
+model Deal {
+  id            String       @id @default(uuid())
+  title         String
+  description   String
+
+  originalPrice Int?
+
+  discountValue Int          @default(0)
+  discountType  DiscountType @default(NONE)
+
+  imageUrl      String?
+
+  startsAt      DateTime
+  endsAt        DateTime
+
+  merchantId    String
+  merchant      Merchant     @relation(fields: [merchantId], references: [id])
+
+  redemptions   Redemption[]
+
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+}
+
+model Redemption {
+  id          String   @id @default(uuid())
+  dealId      String
+  deal        Deal     @relation(fields: [dealId], references: [id])
+
+  /// full raw QR payload (JSON string)
+  code        String   @unique
+
+  redeemedAt  DateTime @default(now())
+}
