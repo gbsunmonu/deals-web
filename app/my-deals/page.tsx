@@ -1,18 +1,31 @@
 // app/my-deals/page.tsx
-import SignInCard from "@/components/auth/SignInCard";
+import { redirect } from "next/navigation";
+import prisma from "@/lib/prisma";
+import { getServerSupabaseRSC } from "@/lib/supabase";
 
-export default function MyDealsPage() {
-  return (
-    <div className="mx-auto max-w-4xl px-4 py-10">
-      <h1 className="mb-2 text-2xl font-semibold">My deals</h1>
-      <p className="mb-8 text-sm text-neutral-600">
-        Create a Dealina account to save deals, manage favourites, and see
-        future features. For now, you can still browse all live deals on the
-        Explore page.
-      </p>
+export default async function MyDealsPage() {
+  // Get the current Supabase user (server-side)
+  const supabase = await getServerSupabaseRSC();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
 
-      {/* After sign in / sign up, go to merchant profile */}
-      <SignInCard next="/merchant/profile" />
-    </div>
-  );
+  // 1) Not logged in → send to login, and after login go to merchant deals
+  if (!user) {
+    redirect("/login?next=/merchant/deals");
+  }
+
+  // 2) Logged in: make sure they have a merchant profile
+  const merchant = await prisma.merchant.findUnique({
+    where: { userId: user.id },
+    select: { id: true },
+  });
+
+  if (!merchant) {
+    // No merchant yet → send them to set up their business profile
+    redirect("/merchant/profile");
+  }
+
+  // 3) Merchant exists → send straight to the main merchant deals page
+  redirect("/merchant/deals");
 }

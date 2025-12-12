@@ -1,125 +1,193 @@
 "use client";
+
 import { useEffect, useRef, useState } from "react";
-import { BrowserMultiFormatReader, IScannerControls, Result } from "@zxing/browser";
+import {
+  BrowserMultiFormatReader,
+  IScannerControls,
+} from "@zxing/browser";
+import type { Result } from "@zxing/library";
 
+// Try to extract our deal code from either a bare code or a full URL
 function extractCodeFromUrl(text: string): string | null {
-  // Accept either a bare code (e.g., J7YQR) or a URL like http://localhost:3000/r/J7YQR
-  const bare = text.trim().toUpperCase();
-  if (/^[A-Z0-9]{4,10}$/.test(bare)) return bare;
+  // Example QR payloads we want to support:
+  //  - "J7YQR"
+  //  - "https://yourdomain.com/r/J7YQR"
+  //  - "https://dealina.com/r/J7YQR?x=1"
 
-  try {
-    const url = new URL(text);
-    const parts = url.pathname.split("/").filter(Boolean);
-    // find last non-empty segment as code
-    const maybe = parts[parts.length - 1]?.toUpperCase() || "";
-    return /^[A-Z0-9]{4,10}$/.test(maybe) ? maybe : null;
-  } catch {
-    return null;
+  const trimmed = text.trim();
+
+  // Case 1: looks like a short code already
+  if (/^[A-Z0-9]{4,10}$/i.test(trimmed)) {
+    return trimmed;
   }
+
+  // Case 2: try to parse as URL and grab last path segment
+  try {
+    const url = new URL(trimmed);
+    const parts = url.pathname.split("/").filter(Boolean);
+    const last = parts[parts.length - 1];
+    if (last && /^[A-Z0-9]{4,10}$/i.test(last)) {
+      return last;
+    }
+  } catch {
+    // not a URL, ignore
+  }
+
+  return null;
 }
 
 export default function ScanPage() {
-  const videoRef = useRef<HTMLVideoElement>(null);
-  const controlsRef = useRef<IScannerControls | null>(null);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const scannerRef = useRef<IScannerControls | null>(null);
 
-  const [lastText, setLastText] = useState<string>("");
-  const [merchantId, setMerchantId] = useState("");
-  const [merchantPin, setMerchantPin] = useState("");
-  const [message, setMessage] = useState("");
+  const [isScanning, setIsScanning] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [lastResult, setLastResult] = useState<string | null>(null);
+  const [detectedCode, setDetectedCode] = useState<string | null>(null);
 
   useEffect(() => {
-    const reader = new BrowserMultiFormatReader();
-    let active = true;
+    // Guard: only run in browser and when we have a video element
+    if (!isScanning || !videoRef.current) return;
 
-    async function start() {
-      try {
-        const video = videoRef.current!;
-        const controls = await reader.decodeFromVideoDevice(
-          undefined, // default camera
-          video,
-          (result: Result | undefined, _err, _controls) => {
-            // Save controls so we can stop later
-            if (_controls && !controlsRef.current) controlsRef.current = _controls;
+    const codeReader = new BrowserMultiFormatReader();
 
-            if (!active || !result) return;
+    codeReader
+      .decodeFromVideoDevice(
+        undefined, // ✅ instead of null
+        videoRef.current,
+        (result: Result | undefined, err) => {
+          if (result) {
             const text = result.getText();
-            setLastText(text);
+            const code = extractCodeFromUrl(text);
+
+            setLastResult(text);
+
+            if (code) {
+              setDetectedCode(code);
+              setIsScanning(false); // stop scanning
+            }
           }
-        );
-        controlsRef.current = controls;
-      } catch (e) {
-        setMessage("Could not access camera. Check permissions.");
-      }
-    }
 
-    start();
-    return () => {
-      active = false;
-      controlsRef.current?.stop();
-    };
-  }, []);
-
-  const confirmScanned = async () => {
-    setMessage("");
-    const code = extractCodeFromUrl(lastText);
-    if (!code) {
-      setMessage("Could not read a valid code from the scan.");
-      return;
-    }
-    if (!merchantId || !merchantPin) {
-      setMessage("Enter merchantId and PIN first.");
-      return;
-    }
-    try {
-      const res = await fetch("/api/redemptions/confirm", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ code, merchantId, merchantPin }),
+          if (err) {
+            // Don’t spam errors for every frame; only show fatal errors
+            const name = (err as any)?.name;
+            if (name && name !== "NotFoundException") {
+              console.warn("Scanner error:", err);
+            }
+          }
+        }
+      )
+      .then((controls) => {
+        scannerRef.current = controls;
+      })
+      .catch((err) => {
+        console.error("Error starting scanner:", err);
+        setError("Unable to access camera. Please allow camera permission.");
+        setIsScanning(false);
       });
-      const data = await res.json();
-      if (res.ok) setMessage(`✅ Confirmed: ${code}`);
-      else setMessage(`❌ ${data.error || "Failed"}`);
-    } catch {
-      setMessage("Server error.");
-    }
-  };
+
+    return () => {
+      scannerRef.current?.stop();
+      scannerRef.current = null;
+    };
+  }, [isScanning]);
+
+  function handleRestart() {
+    setDetectedCode(null);
+    setLastResult(null);
+    setError(null);
+    setIsScanning(true);
+  }
 
   return (
-    <div style={{ padding: 40, fontFamily: "sans-serif" }}>
-      <h1>Scan QR to Confirm</h1>
+    <main className="mx-auto flex max-w-md flex-col gap-5 px-4 py-8">
+      <header>
+        <p className="text-xs font-semibold uppercase tracking-[0.18em] text-emerald-500">
+          Merchant
+        </p>
+        <h1 className="mt-1 text-2xl font-semibold text-slate-900">
+          Scan customer QR
+        </h1>
+        <p className="mt-1 text-sm text-slate-500">
+          Point your camera at the customer&apos;s QR code to verify their deal.
+        </p>
+      </header>
 
-      <div style={{ marginBottom: 10 }}>
-        <div style={{ fontSize: 12, color: "#666" }}>Merchant ID</div>
-        <input
-          value={merchantId}
-          onChange={(e) => setMerchantId(e.target.value)}
-          placeholder="merchantId (UUID)"
-          style={{ padding: 8, width: 420 }}
-        />
-      </div>
-      <div style={{ marginBottom: 10 }}>
-        <div style={{ fontSize: 12, color: "#666" }}>Merchant PIN</div>
-        <input
-          value={merchantPin}
-          onChange={(e) => setMerchantPin(e.target.value)}
-          placeholder="6-digit PIN"
-          type="password"
-          style={{ padding: 8, width: 420 }}
-        />
-      </div>
+      {/* Camera box */}
+      <section className="overflow-hidden rounded-3xl border border-slate-200 bg-black/90 shadow-sm">
+        <div className="relative aspect-[3/4] w-full">
+          <video
+            ref={videoRef}
+            className="h-full w-full object-cover"
+            autoPlay
+            muted
+            playsInline
+          />
 
-      <video ref={videoRef} style={{ width: 420, height: 320, background: "#000" }} />
+          {/* Overlay frame */}
+          <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+            <div className="h-40 w-40 rounded-3xl border-2 border-emerald-400/90 shadow-[0_0_0_9999px_rgba(15,23,42,0.55)]" />
+          </div>
+        </div>
+      </section>
 
-      <div style={{ marginTop: 10 }}>
-        <p style={{ fontSize: 12, color: "#666" }}>Last scan:</p>
-        <code>{lastText || "Nothing scanned yet"}</code>
-      </div>
+      {/* Status + result panel */}
+      <section className="space-y-3 rounded-3xl border border-slate-200 bg-white p-4 text-sm shadow-sm">
+        {error && (
+          <div className="rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
+            {error}
+          </div>
+        )}
 
-      <button onClick={confirmScanned} style={{ marginTop: 12, padding: "8px 16px" }}>
-        Confirm scanned code
-      </button>
+        {!error && (
+          <p className="text-xs text-slate-500">
+            {isScanning
+              ? "Scanning… Hold the QR code inside the frame."
+              : detectedCode
+              ? "Code detected. Use the button below to open the deal details."
+              : "Scanner stopped. You can restart scanning if needed."}
+          </p>
+        )}
 
-      {message && <p style={{ marginTop: 12 }}>{message}</p>}
-    </div>
+        {lastResult && (
+          <div className="rounded-2xl bg-slate-50 px-3 py-2 text-[11px] text-slate-600">
+            <p className="font-semibold text-slate-800">Raw scan text</p>
+            <p className="mt-1 break-words font-mono text-[11px]">
+              {lastResult}
+            </p>
+          </div>
+        )}
+
+        {detectedCode && (
+          <div className="rounded-2xl bg-emerald-50 px-3 py-2 text-xs text-emerald-800">
+            <p className="text-[11px] font-semibold uppercase tracking-wide text-emerald-700">
+              Detected code
+            </p>
+            <p className="mt-1 font-mono text-sm font-semibold">
+              {detectedCode}
+            </p>
+            <p className="mt-1 text-[11px]">
+              Tap the button below to open the deal / redemption page.
+            </p>
+            <a
+              href={`/r/${encodeURIComponent(detectedCode)}`}
+              className="mt-3 inline-flex w-full items-center justify-center rounded-full bg-emerald-600 px-4 py-2 text-xs font-semibold text-white hover:bg-emerald-700"
+            >
+              Open deal details
+            </a>
+          </div>
+        )}
+
+        <div className="flex justify-between pt-1">
+          <button
+            type="button"
+            onClick={handleRestart}
+            className="rounded-full border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+          >
+            Restart scan
+          </button>
+        </div>
+      </section>
+    </main>
   );
 }

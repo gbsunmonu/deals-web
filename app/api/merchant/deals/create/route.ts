@@ -1,89 +1,105 @@
 // app/api/merchant/deals/create/route.ts
 
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
-import { DiscountType } from "@prisma/client";
+import { getServerSupabaseRSC } from "@/lib/supabase";
 
-// Optional: if you have this constant already, you can import it instead.
-const FALLBACK_DEMO_MERCHANT_ID =
-  process.env.DEMO_MERCHANT_ID ?? "11111111-1111-1111-1111-111111111111";
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
 
-type CreateDealBody = {
-  title: string;
-  description: string;
-  discountValue: number | string;
-  startsAt: string; // ISO date string from the form
-  endsAt: string;   // ISO date string from the form
-  imageUrl?: string | null;
-};
-
-export async function POST(req: Request) {
+export async function POST(req: NextRequest) {
   try {
-    const body = (await req.json()) as CreateDealBody;
+    const body = await req.json();
 
-    const title = body.title?.trim();
-    const description = body.description?.trim();
-    const discountValueNumber = Number(body.discountValue);
-    const startsAt = new Date(body.startsAt);
-    const endsAt = new Date(body.endsAt);
-    const imageUrl = body.imageUrl ?? null;
+    const {
+      title,
+      description,
+      originalPrice,
+      discountValue,
+      startsAt,
+      endsAt,
+      imageUrl,
+    } = body;
 
-    // ---- basic validation ----
+    // ✅ Basic validation
     if (!title) {
       return NextResponse.json(
-        { error: "Title is required." },
+        { error: "Title is required" },
         { status: 400 }
       );
     }
 
-    if (!description) {
+    if (!startsAt || !endsAt) {
       return NextResponse.json(
-        { error: "Description is required." },
+        { error: "Start and end dates are required" },
         { status: 400 }
       );
     }
 
-    if (!Number.isFinite(discountValueNumber) || discountValueNumber < 0) {
+    // ✅ Auth: merchant must be logged in
+    const supabase = await getServerSupabaseRSC();
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+
+    if (!user) {
       return NextResponse.json(
-        { error: "Discount value must be a non-negative number." },
-        { status: 400 }
+        { error: "Not authenticated" },
+        { status: 401 }
       );
     }
 
-    if (Number.isNaN(startsAt.getTime()) || Number.isNaN(endsAt.getTime())) {
+    // Find merchant matched to this Supabase user
+    const merchant = await prisma.merchant.findUnique({
+      where: { userId: user.id },
+    });
+
+    if (!merchant) {
       return NextResponse.json(
-        { error: "Start and end dates are required." },
+        { error: "No merchant profile found for this user" },
         { status: 400 }
       );
     }
 
-    // ---- choose enum value ----
-    // ✅ IMPORTANT: this is an actual enum VALUE, not the enum type itself
-    const discountType =
-      discountValueNumber > 0 ? DiscountType.PERCENT : DiscountType.NONE;
+    // ✅ Make sure description is never null
+    const safeDescription: string =
+      typeof description === "string" && description.trim().length > 0
+        ? description
+        : "";
 
-    const merchantId = FALLBACK_DEMO_MERCHANT_ID;
+    // ✅ Normalise price/discount
+    let numericOriginal: number | null = null;
+    if (originalPrice !== undefined && originalPrice !== null && originalPrice !== "") {
+      const n = Number(originalPrice);
+      numericOriginal = Number.isNaN(n) ? null : n;
+    }
 
-    // ---- insert into DB ----
-    const newDeal = await prisma.deal.create({
+    let numericDiscount = 0;
+    if (discountValue !== undefined && discountValue !== null && discountValue !== "") {
+      const n = Number(discountValue);
+      numericDiscount = Number.isNaN(n) ? 0 : n;
+    }
+
+    // ✅ Create deal using ONLY fields from your Prisma model
+    const deal = await prisma.deal.create({
       data: {
         title,
-        description,
-        discountValue: discountValueNumber,
-        discountType,           // ✅ use the variable, not "DiscountType"
-        startsAt,
-        endsAt,
-        merchantId,
-        imageUrl,
-        isActive: true,
+        description: safeDescription,
+        originalPrice: numericOriginal,
+        discountValue: numericDiscount,
+        // discountType defaults to NONE
+        startsAt: new Date(startsAt),
+        endsAt: new Date(endsAt),
+        imageUrl: imageUrl?.trim() || null,
+        merchantId: merchant.id,
       },
     });
 
-    return NextResponse.json({ deal: newDeal }, { status: 201 });
+    return NextResponse.json({ deal }, { status: 201 });
   } catch (err) {
-    console.error("Create deal error:", err);
+    console.error("[MERCHANT DEAL CREATE] error:", err);
     return NextResponse.json(
-      { error: "Failed to create deal." },
+      { error: "Failed to create deal" },
       { status: 500 }
     );
   }

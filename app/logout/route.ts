@@ -1,21 +1,18 @@
 // app/logout/route.ts
-import { NextResponse } from 'next/server';
-import { createServerClient } from '@supabase/ssr';
+import { NextRequest, NextResponse } from "next/server";
+import { createSupabaseServer } from "@/lib/supabase-server";
 
-export async function GET(request: Request) {
-  const url = new URL(request.url);
-  const res = NextResponse.redirect(new URL('/', url));
-  const supabase = createServerClient(
-    process.env.SUPABASE_URL!,
-    process.env.SUPABASE_ANON_KEY!,
-    {
-      cookies: {
-        get: (name) => res.cookies.get(name)?.value,
-        set: (name, value, options) => res.cookies.set({ name, value, ...options }),
-        remove: (name, options) => res.cookies.set({ name, value: '', ...options }),
-      },
-    }
-  );
-  await supabase.auth.signOut();
-  return res;
+export async function GET(req: NextRequest) {
+  try {
+    const supabase = createSupabaseServer();
+
+    // Sign out the current user (if any)
+    await supabase.auth.signOut();
+  } catch (err) {
+    console.error("[/logout] sign out error:", err);
+    // We still redirect even if sign-out fails
+  }
+
+  // Redirect back to home (or /auth/sign-in if you prefer)
+  return NextResponse.redirect(new URL("/", req.url), { status: 302 });
 }

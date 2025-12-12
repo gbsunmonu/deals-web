@@ -1,26 +1,12 @@
 // app/api/deals/create/route.ts
+import { NextRequest, NextResponse } from "next/server";
+import prisma from "@/lib/prisma";
+import { getServerSupabaseRSC } from "@/lib/supabase";
 
-import { NextResponse } from "next/server";
-import { prisma } from "@/lib/prisma";
-import { DiscountType } from "@prisma/client";
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
 
-/**
- * POST /api/deals/create
- * Alternate creation endpoint, same discount logic as /api/deals
- *
- * Body:
- * {
- *   title: string;
- *   description: string;
- *   originalPrice: number | null;
- *   discountValue: number;          // percentage (0–100)
- *   startsAt: string;               // ISO
- *   endsAt: string;                 // ISO
- *   imageUrl?: string | null;
- *   merchantId: string;             // required
- * }
- */
-export async function POST(req: Request) {
+export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
 
@@ -32,59 +18,87 @@ export async function POST(req: Request) {
       startsAt,
       endsAt,
       imageUrl,
-      merchantId,
-    } = body as {
-      title: string;
-      description: string;
-      originalPrice: number | null;
-      discountValue: number;
-      startsAt: string;
-      endsAt: string;
-      imageUrl?: string | null;
-      merchantId: string;
-    };
+    } = body;
 
-    if (!title || !merchantId) {
+    // ✅ Basic validation
+    if (!title) {
       return NextResponse.json(
-        { error: "title and merchantId are required" },
-        { status: 400 },
+        { error: "Title is required" },
+        { status: 400 }
       );
     }
 
-    const parsedOriginalPrice =
-      originalPrice !== null && !Number.isNaN(Number(originalPrice))
-        ? Number(originalPrice)
-        : null;
+    if (!startsAt || !endsAt) {
+      return NextResponse.json(
+        { error: "Start and end dates are required" },
+        { status: 400 }
+      );
+    }
 
-    const parsedDiscount =
-      discountValue && !Number.isNaN(Number(discountValue))
-        ? Number(discountValue)
-        : 0;
+    // ✅ Auth: make sure we know which merchant is creating this deal
+    const supabase = await getServerSupabaseRSC();
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
 
-    const discountType: DiscountType =
-      parsedDiscount > 0 ? DiscountType.PERCENT : DiscountType.NONE;
+    if (!user) {
+      return NextResponse.json(
+        { error: "Not authenticated" },
+        { status: 401 }
+      );
+    }
+
+    // Find merchant by supabase userId
+    const merchant = await prisma.merchant.findUnique({
+      where: { userId: user.id },
+    });
+
+    if (!merchant) {
+      return NextResponse.json(
+        { error: "No merchant profile found for this user" },
+        { status: 400 }
+      );
+    }
+
+    // ✅ Normalise description so it is never null
+    const safeDescription: string =
+      typeof description === "string" && description.trim().length > 0
+        ? description
+        : "";
+
+    // ✅ Normalise number fields
+    let numericOriginal: number | null = null;
+    if (originalPrice !== undefined && originalPrice !== null && originalPrice !== "") {
+      const n = Number(originalPrice);
+      numericOriginal = Number.isNaN(n) ? null : n;
+    }
+
+    let numericDiscount = 0;
+    if (discountValue !== undefined && discountValue !== null && discountValue !== "") {
+      const n = Number(discountValue);
+      numericDiscount = Number.isNaN(n) ? 0 : n;
+    }
 
     const deal = await prisma.deal.create({
       data: {
-        title: title.trim(),
-        description: description?.trim() ?? "",
-        originalPrice: parsedOriginalPrice,
-        discountValue: parsedDiscount,
-        discountType,
+        title,
+        description: safeDescription,
+        originalPrice: numericOriginal,
+        discountValue: numericDiscount,
+        // discountType will use the default (NONE) from the schema
         startsAt: new Date(startsAt),
         endsAt: new Date(endsAt),
         imageUrl: imageUrl?.trim() || null,
-        merchantId,
-        isActive: true,
+        merchantId: merchant.id,
       },
     });
 
-    return NextResponse.json(deal, { status: 201 });
-  } catch (error) {
-    console.error("[POST /api/deals/create] Error:", error);
+    return NextResponse.json({ deal }, { status: 201 });
+  } catch (err) {
+    console.error("[CREATE DEAL] error:", err);
     return NextResponse.json(
       { error: "Failed to create deal" },
-      { status: 500 },
+      { status: 500 }
     );
   }
 }

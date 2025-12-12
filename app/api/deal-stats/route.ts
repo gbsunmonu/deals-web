@@ -9,14 +9,16 @@ export async function POST(req: NextRequest) {
     let userId: string | null = body.userId ?? null;
     let email: string | null = null;
 
+    // If userId not provided in body, read from Supabase auth
     if (!userId) {
       const supabase = await getServerSupabaseRSC();
       const {
         data: { user },
       } = await supabase.auth.getUser();
+
       if (user) {
         userId = user.id;
-        email = user.email ?? null;
+        email = user.email ?? null; // currently not stored in DB, just available if needed
       }
     }
 
@@ -55,11 +57,11 @@ export async function POST(req: NextRequest) {
         address: address ?? "",
         phone: phone ?? "",
         website: website ?? "",
-        logoUrl: logoUrl ?? null,
+        avatarUrl: logoUrl ?? null, // matches `avatarUrl` in Prisma schema
       },
       create: {
         userId,
-        email: email ?? "",
+        // ❌ email removed because Merchant model has no `email` field
         name,
         description: description ?? "",
         category: category ?? "",
@@ -67,7 +69,7 @@ export async function POST(req: NextRequest) {
         address: address ?? "",
         phone: phone ?? "",
         website: website ?? "",
-        logoUrl: logoUrl ?? null,
+        avatarUrl: logoUrl ?? null,
       },
     });
 

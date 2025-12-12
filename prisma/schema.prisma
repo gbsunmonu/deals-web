@@ -47,6 +47,9 @@ model Deal {
 
   originalPrice Int?
 
+  // NEW FIELD
+  shortCode     String?      @unique
+
   discountValue Int          @default(0)
   discountType  DiscountType @default(NONE)
 
@@ -63,6 +66,7 @@ model Deal {
   createdAt     DateTime     @default(now())
   updatedAt     DateTime     @updatedAt
 }
+
 
 model Redemption {
   id          String   @id @default(uuid())

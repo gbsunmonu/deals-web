@@ -1,62 +1,57 @@
 // lib/supabase.ts
-// Server-only helpers for Supabase (no "use client" here)
+import { cookies } from "next/headers";
+import { createServerClient } from "@supabase/ssr";
+import { createClient as createSupabaseClient } from "@supabase/supabase-js";
 
-import { createClient } from "@supabase/supabase-js";
-import {
-  createServerClient,
-  type CookieOptions,
-} from "@supabase/ssr";
-import type { NextRequest } from "next/server";
-
-// ---------- ENV ----------
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!;
 const SUPABASE_ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
-const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY!;
+const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY!;
 
-// ---------- Admin client (no auth cookies) ----------
-export const supabaseAdmin = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, {
-  auth: { persistSession: false },
-});
-
-// ---------- For API route handlers: app/api/*/route.ts ----------
-export function getServerSupabase(req: NextRequest) {
-  return createServerClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
-    cookies: {
-      get(name: string) {
-        // Read cookie from the incoming request
-        return req.cookies.get(name)?.value;
-      },
-      // For now we don't need to set/remove cookies from route handlers.
-      // If we ever do, we'll set them on the Response instead.
-      set(_name: string, _value: string, _options: CookieOptions) {},
-      remove(_name: string, _options: CookieOptions) {},
-    },
-    headers: {
-      get(name: string) {
-        return req.headers.get(name) ?? undefined;
-      },
-    },
-  });
+if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
+  throw new Error(
+    "[supabase] SUPABASE_URL or SUPABASE_ANON_KEY is missing. Check your env vars."
+  );
 }
 
-// ---------- For server components (RSC) / layouts / pages ----------
-// We DON'T touch next/headers.cookies() here to avoid cookieStore issues.
-// Supabase will just treat the request as "no auth cookie found".
+/**
+ * Server-side Supabase client for RSC/server components/server actions.
+ */
 export function getServerSupabaseRSC() {
-  return createServerClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
-    cookies: {
-      get(_name: string) {
-        // No cookie reading in RSC for now – prevents cookieStore.get error
-        return undefined;
+  // In Next 16 the validator treats this like a Promise type – we just
+  // cast to any so we can use get/set/delete without TS errors.
+  const cookieStore = cookies() as any;
+
+  const client = createServerClient(
+    SUPABASE_URL,
+    SUPABASE_ANON_KEY,
+    {
+      cookies: {
+        get(name: string) {
+          return cookieStore.get(name)?.value;
+        },
+        set(name: string, value: string, options: any) {
+          cookieStore.set({ name, value, ...options });
+        },
+        remove(name: string, options: any) {
+          cookieStore.set({ name, value: "", ...options });
+        },
       },
-      set(_name: string, _value: string, _options: CookieOptions) {},
-      remove(_name: string, _options: CookieOptions) {},
-    },
-    headers: {
-      get(_name: string) {
-        // We don't need headers in RSC yet either
-        return undefined;
-      },
-    },
-  });
+    } as any
+  );
+
+  return client;
 }
+
+/**
+ * Admin Supabase client (service role).
+ * Only use this in server-only code (API routes, server actions).
+ */
+export const supabaseAdmin = createSupabaseClient(
+  SUPABASE_URL,
+  SUPABASE_SERVICE_KEY,
+  {
+    auth: {
+      persistSession: false,
+    },
+  }
+);

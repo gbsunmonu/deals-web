@@ -10,7 +10,7 @@ type CreateDealPayload = {
   originalPrice: number | null;
   discountValue: number | null;
   startsAt: string; // ISO date
-  endsAt: string;   // ISO date
+  endsAt: string; // ISO date
   imageUrl?: string | null;
 };
 
@@ -33,16 +33,19 @@ export default function NewDealPage() {
       const title = String(formData.get("title") || "").trim();
       const description = String(formData.get("description") || "").trim();
 
-      const originalPriceRaw = String(formData.get("originalPrice") || "").trim();
-      const discountValueRaw = String(formData.get("discountValue") || "").trim();
+      const originalPriceRaw = String(
+        formData.get("originalPrice") || ""
+      ).trim();
+      const discountValueRaw = String(
+        formData.get("discountValue") || ""
+      ).trim();
 
       const startsAt = String(formData.get("startsAt") || "").trim();
       const endsAt = String(formData.get("endsAt") || "").trim();
 
       // optional manual URL (fallback if no upload)
-      let imageUrl: string | null = String(
-        formData.get("imageUrl") || ""
-      ).trim() || null;
+      let imageUrl: string | null =
+        String(formData.get("imageUrl") || "").trim() || null;
 
       if (!title) {
         throw new Error("Please enter a title.");
@@ -51,7 +54,8 @@ export default function NewDealPage() {
       let originalPrice: number | null = null;
       if (originalPriceRaw) {
         const n = Number(originalPriceRaw.replace(/,/g, ""));
-        if (Number.isNaN(n) || n <= 0) throw new Error("Original price looks invalid.");
+        if (Number.isNaN(n) || n <= 0)
+          throw new Error("Original price looks invalid.");
         originalPrice = n;
       }
 
@@ -120,7 +124,7 @@ export default function NewDealPage() {
         throw new Error(data?.error || "Failed to create deal.");
       }
 
-      // Go to "My deals" or the new deal page
+      // Go to "My deals"
       router.push("/merchant/deals");
     } catch (err: any) {
       console.error(err);
@@ -143,7 +147,9 @@ export default function NewDealPage() {
     // Show a quick preview
     const reader = new FileReader();
     reader.onload = (ev) => {
-      setImagePreview(typeof ev.target?.result === "string" ? ev.target.result : null);
+      setImagePreview(
+        typeof ev.target?.result === "string" ? ev.target.result : null
+      );
     };
     reader.readAsDataURL(file);
   }
@@ -288,6 +294,7 @@ export default function NewDealPage() {
 
             <label className="flex cursor-pointer flex-col items-center justify-center rounded-2xl border-2 border-dashed border-slate-200 bg-slate-50 px-4 py-6 text-center text-xs text-slate-500 hover:border-emerald-400 hover:bg-emerald-50/40">
               {imagePreview ? (
+                // eslint-disable-next-line @next/next/no-img-element
                 <img
                   src={imagePreview}
                   alt="Preview"

@@ -1,67 +1,31 @@
-// app/actions/createDeal.ts
 "use server";
 
-import { prisma } from "@/lib/prisma";
-import { DiscountType } from "@prisma/client";
-import { getMerchantId } from "@/lib/session";
+import prisma from "@/lib/prisma";
 
-export async function createDeal(formData: FormData) {
-  const merchantId = await getMerchantId();
-  if (!merchantId) {
-    throw new Error("Not logged in as merchant");
+function makeShortCode() {
+  return Math.random().toString(36).substring(2, 8).toUpperCase();
+}
+
+export async function createDeal(data: any) {
+  let shortCode = makeShortCode();
+
+  // Try 3 times to avoid collisions
+  for (let i = 0; i < 3; i++) {
+    const exists = await prisma.deal.findFirst({
+      where: { shortCode },
+      select: { id: true },
+    });
+
+    if (!exists) break;
+    shortCode = makeShortCode();
   }
 
-  const title = formData.get("title")?.toString().trim() || "";
-  const description = formData.get("description")?.toString().trim() || "";
-  const terms = formData.get("terms")?.toString().trim() || "";
-
-  const startsAtStr = formData.get("startsAt")?.toString();
-  const endsAtStr = formData.get("endsAt")?.toString();
-
-  if (!startsAtStr || !endsAtStr) {
-    throw new Error("Start and end date are required");
-  }
-
-  const startsAt = new Date(startsAtStr);
-  const endsAt = new Date(endsAtStr);
-
-  const discountTypeRaw =
-    (formData.get("discountType")?.toString() as keyof typeof DiscountType) ||
-    "NONE";
-  const discountValueStr = formData.get("discountValue")?.toString() || "";
-
-  const discountType: DiscountType = DiscountType[discountTypeRaw] ?? DiscountType.NONE;
-  const discountValue =
-    discountType === DiscountType.NONE || discountValueStr === ""
-      ? null
-      : Number(discountValueStr);
-
-  const currency = formData.get("currency")?.toString() || "NGN";
-  const city = formData.get("city")?.toString().trim() || "";
-  const category = formData.get("category")?.toString().trim() || "";
-
-  const imageUrl = formData.get("imageUrl")?.toString().trim() || null;
-
-  // simple 5-char short code
-  const shortCode = Math.random().toString(36).substring(2, 7).toUpperCase();
-
-  await prisma.deal.create({
+  const deal = await prisma.deal.create({
     data: {
-      merchantId,
-      title,
-      description,
-      terms: terms || null,
-      startsAt,
-      endsAt,
-      discountType,
-      discountValue,
-      currency,
-      city,
-      category,
-      imageUrl,
+      ...data,
       shortCode,
     },
   });
 
-  return { success: true, shortCode };
+  return deal;
 }

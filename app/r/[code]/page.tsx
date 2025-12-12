@@ -1,122 +1,143 @@
 // app/r/[code]/page.tsx
 
-import { prisma } from "@/lib/prisma";
-import Link from "next/link";
 import { notFound } from "next/navigation";
+import prisma from "@/lib/prisma";
+import Link from "next/link";
 
-export const revalidate = 0;
-
-type RedemptionPageProps = {
-  params: Promise<{ code: string }>;
+type RedeemPageProps = {
+  params: { code: string };
 };
 
-export default async function RedemptionPage({ params }: RedemptionPageProps) {
-  const { code } = await params;
+function formatNaira(value: number | null | undefined) {
+  if (value == null || isNaN(value as any)) return "—";
+  return `₦${Number(value).toLocaleString("en-NG")}`;
+}
 
-  if (!code) {
-    notFound();
+export default async function RedeemPage({ params }: RedeemPageProps) {
+  const rawCode = params.code?.trim();
+
+  if (!rawCode) {
+    return notFound();
   }
 
+  // 🔑 IMPORTANT: use `code` (the unique field), not `shortCode`
   const redemption = await prisma.redemption.findUnique({
-    where: { shortCode: code },
+    where: { code: rawCode },
     include: {
       deal: {
         include: {
-          merchant: true,
+          merchant: {
+            select: {
+              id: true,
+              name: true,
+              city: true,
+              address: true,
+              phone: true,
+            },
+          },
         },
       },
     },
   });
 
-  if (!redemption || !redemption.deal) {
+  if (!redemption) {
     return (
-      <main className="mx-auto max-w-3xl px-4 py-8">
-        <h1 className="mb-4 text-2xl font-semibold">Redemption not found</h1>
-        <p className="text-sm text-gray-600">
-          This redemption code is invalid or has been removed.
+      <main className="mx-auto max-w-md px-4 py-16 text-center">
+        <h1 className="text-xl font-semibold text-slate-900">
+          Invalid or unknown code
+        </h1>
+        <p className="mt-2 text-sm text-slate-500">
+          This QR / redemption code could not be found. Please check that the
+          code was scanned correctly or contact the merchant.
         </p>
+        <Link
+          href="/"
+          className="mt-6 inline-flex items-center rounded-full bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-700"
+        >
+          Go back home
+        </Link>
       </main>
     );
   }
 
-  const { deal } = redemption;
+  const deal = redemption.deal;
   const merchant = deal.merchant;
-  const isRedeemed = redemption.redeemed;
 
   return (
-    <main className="mx-auto max-w-3xl px-4 py-8">
-      <h1 className="mb-4 text-2xl font-semibold">Confirm redemption</h1>
+    <main className="mx-auto max-w-md px-4 py-10">
+      <section className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
+        <p className="text-xs font-semibold uppercase tracking-[0.16em] text-emerald-500">
+          Dealina · Redemption
+        </p>
+        <h1 className="mt-2 text-xl font-semibold text-slate-900">
+          Code verified
+        </h1>
 
-      <section className="mb-6 rounded-lg border bg-white p-4 text-sm shadow-sm">
-        <p className="mb-1 text-xs text-gray-500">Short code</p>
-        <p className="mb-3 font-mono text-lg font-semibold">
-          {redemption.shortCode}
+        <p className="mt-2 text-sm text-slate-600">
+          This code belongs to the deal below. The merchant can now choose to
+          honor it and mark it as used in their own system.
         </p>
 
-        <p className="mb-1 text-xs text-gray-500">Deal</p>
-        <p className="mb-3 text-sm font-medium">{deal.title}</p>
-
-        {merchant && (
-          <>
-            <p className="mb-1 text-xs text-gray-500">Merchant</p>
-            <p className="mb-2 text-sm">
-              {merchant.name}
-              {merchant.city ? ` · ${merchant.city}` : ""}
-            </p>
-          </>
-        )}
-
-        <p className="mt-2 text-xs text-gray-600">
-          Valid until{" "}
-          {new Date(deal.endsAt).toLocaleDateString(undefined, {
-            year: "numeric",
-            month: "short",
-            day: "numeric",
-          })}
-        </p>
-      </section>
-
-      <section className="rounded-lg border bg-white p-4 text-sm shadow-sm">
-        {isRedeemed ? (
-          <p className="text-sm font-medium text-green-700">
-            ✅ This redemption has already been confirmed on{" "}
-            {redemption.redeemedAt
-              ? new Date(redemption.redeemedAt).toLocaleString()
-              : "a previous date"}
-            .
+        <div className="mt-5 rounded-2xl bg-slate-50 p-4 text-left text-sm">
+          <p className="text-xs font-medium uppercase text-slate-500">
+            Deal
           </p>
-        ) : (
-          <>
-            <p className="mb-3 text-xs text-gray-600">
-              Merchant: if the customer is in front of you and you have
-              validated the discount, tap the button below to confirm.
+          <p className="mt-1 font-semibold text-slate-900">{deal.title}</p>
+          {deal.description && (
+            <p className="mt-1 text-xs text-slate-500 line-clamp-3">
+              {deal.description}
             </p>
+          )}
 
-            <form
-              action="/api/redemptions/confirm"
-              method="POST"
-              className="inline-flex items-center gap-2"
-            >
-              <input type="hidden" name="shortCode" value={redemption.shortCode} />
-              <button
-                type="submit"
-                className="inline-flex items-center rounded-md bg-black px-4 py-2 text-xs font-medium text-white hover:bg-gray-900"
-              >
-                Confirm redemption
-              </button>
-            </form>
-          </>
-        )}
-      </section>
+          <div className="mt-3 flex justify-between text-xs text-slate-600">
+            <div>
+              <p className="text-[11px] font-medium uppercase text-slate-500">
+                Merchant
+              </p>
+              <p className="mt-1 font-medium text-slate-900">
+                {merchant?.name ?? "Unknown merchant"}
+              </p>
+              {merchant?.city && (
+                <p className="text-[11px] text-slate-500">{merchant.city}</p>
+              )}
+            </div>
+            <div className="text-right">
+              <p className="text-[11px] font-medium uppercase text-slate-500">
+                Redeemed at
+              </p>
+              <p className="mt-1 text-xs text-slate-700">
+                {redemption.redeemedAt.toLocaleString("en-NG", {
+                  day: "2-digit",
+                  month: "short",
+                  year: "numeric",
+                  hour: "2-digit",
+                  minute: "2-digit",
+                  hour12: true,
+                })}
+              </p>
+            </div>
+          </div>
+        </div>
 
-      <div className="mt-6">
+        <div className="mt-5 flex items-center justify-between rounded-2xl bg-emerald-50 px-4 py-3 text-xs text-emerald-800">
+          <div>
+            <p className="font-semibold text-emerald-900">
+              Code: <span className="font-mono">{rawCode}</span>
+            </p>
+            <p className="mt-1 text-[11px]">
+              Show this screen or the original QR to the merchant so they can
+              confirm the deal.
+            </p>
+          </div>
+        </div>
+
         <Link
-          href="/deals"
-          className="text-xs font-medium text-gray-600 hover:underline"
+          href="/explore"
+          className="mt-6 inline-flex w-full items-center justify-center rounded-full bg-slate-900 px-4 py-2.5 text-sm font-semibold text-white hover:bg-slate-800"
         >
-          ← Back to deals
+          Browse more deals
         </Link>
-      </div>
+      </section>
     </main>
   );
 }

@@ -1,21 +1,39 @@
-import QRCode from 'qrcode';
-import { NextResponse } from 'next/server';
+// app/api/qrcode/[code]/route.ts
+import QRCode from "qrcode";
+import { NextRequest } from "next/server";
+
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
 
 export async function GET(
-  _req: Request,
-  ctx: { params: Promise<{ code: string }> }
+  request: NextRequest,
+  context: { params: Promise<{ code: string }> }
 ) {
-  const { code } = await ctx.params;                           // ✅ must await
-  const short = decodeURIComponent(code || '').trim();
+  try {
+    const { code } = await context.params;
+    const payload = (code || "").trim();
 
-  const base = process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000';
-  const url = `${base}/r/${encodeURIComponent(short)}`;
+    if (!payload) {
+      return new Response("Missing QR payload", { status: 400 });
+    }
 
-  const png = await QRCode.toBuffer(url, { margin: 1, width: 512 });
-  return new NextResponse(png, {
-    headers: {
-      'Content-Type': 'image/png',
-      'Cache-Control': 'public, max-age=86400',
-    },
-  });
+    // Generate QR PNG as a buffer
+    const pngBuffer = await QRCode.toBuffer(payload, {
+      errorCorrectionLevel: "M",
+      margin: 1,
+      scale: 6,
+    } as any);
+
+    // Use plain Response and cast to any so TypeScript is happy
+    return new Response(pngBuffer as any, {
+      status: 200,
+      headers: {
+        "Content-Type": "image/png",
+        "Cache-Control": "public, max-age=86400",
+      },
+    });
+  } catch (err: any) {
+    console.error("[QR PNG ERROR]", err);
+    return new Response("Failed to generate QR code", { status: 500 });
+  }
 }
