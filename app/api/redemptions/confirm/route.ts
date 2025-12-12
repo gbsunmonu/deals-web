@@ -1,6 +1,7 @@
 // app/api/redemptions/confirm/route.ts
 import { NextRequest, NextResponse } from "next/server";
-import { prisma } from "@/lib/prisma";
+import prisma from "@/lib/prisma";
+import { Prisma } from "@prisma/client";
 
 // Shape we expect inside the QR payload text
 type DealQrPayload = {
@@ -9,51 +10,47 @@ type DealQrPayload = {
   expiresAt?: string;
 };
 
+function normalizeRawText(input: string) {
+  // normalize whitespace + remove accidental leading/trailing newlines/spaces
+  return input.replace(/\r\n/g, "\n").trim();
+}
+
 export async function POST(req: NextRequest) {
   try {
-    // -----------------------------
-    // 1. Read body as *text* first
-    // -----------------------------
-    const bodyText = await req.text();
-    if (!bodyText) {
-      return NextResponse.json(
-        { error: "Missing request body" },
-        { status: 400 }
-      );
+    // ------------------------------------------------------
+    // 1) Read request body (supports JSON or plain text)
+    // ------------------------------------------------------
+    const contentType = req.headers.get("content-type") || "";
+    let rawText = "";
+
+    if (contentType.includes("application/json")) {
+      // JSON payload (recommended)
+      const body = await req.json().catch(() => null);
+
+      rawText =
+        typeof body === "string"
+          ? body
+          : body?.qrText ||
+            body?.payload ||
+            body?.text ||
+            body?.raw ||
+            body?.code ||
+            "";
+    } else {
+      // Text payload
+      const bodyText = await req.text();
+      rawText = bodyText || "";
     }
 
-    let rawText: string;
-
-    // Try to parse as JSON object first
-    // (e.g. { "qrText": "..." }). If that fails,
-    // treat the whole body as the QR text itself.
-    try {
-      const parsed = JSON.parse(bodyText);
-      if (typeof parsed === "string") {
-        rawText = parsed;
-      } else {
-        rawText =
-          parsed?.qrText ||
-          parsed?.payload ||
-          parsed?.text ||
-          parsed?.raw ||
-          parsed?.code ||
-          bodyText;
-      }
-    } catch {
-      rawText = bodyText.trim();
-    }
+    rawText = normalizeRawText(rawText);
 
     if (!rawText) {
-      return NextResponse.json(
-        { error: "QR text is empty" },
-        { status: 400 }
-      );
+      return NextResponse.json({ error: "QR text is empty" }, { status: 400 });
     }
 
-    // ---------------------------------
-    // 2. Decode the QR JSON payload
-    // ---------------------------------
+    // ------------------------------------------------------
+    // 2) Decode QR payload (must be JSON)
+    // ------------------------------------------------------
     let payload: DealQrPayload;
     try {
       payload = JSON.parse(rawText);
@@ -71,7 +68,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Optional expiry check from payload
+    // Optional expiry check embedded in the QR payload
     if (payload.expiresAt) {
       const expires = new Date(payload.expiresAt);
       if (Number.isNaN(expires.getTime())) {
@@ -88,11 +85,12 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // ---------------------------------
-    // 3. Check that the deal exists
-    // ---------------------------------
+    // ------------------------------------------------------
+    // 3) Fetch deal and validate it is ACTIVE
+    // ------------------------------------------------------
     const deal = await prisma.deal.findUnique({
       where: { id: payload.dealId },
+      select: { id: true, startsAt: true, endsAt: true },
     });
 
     if (!deal) {
@@ -102,17 +100,31 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // ---------------------------------
-    // 4. Create a redemption
-    //    (code is UNIQUE, so re-use fails)
-    // ---------------------------------
+    const now = new Date();
+    if (deal.startsAt > now) {
+      return NextResponse.json(
+        { error: "Deal has not started yet" },
+        { status: 400 }
+      );
+    }
+    if (deal.endsAt < now) {
+      return NextResponse.json(
+        { error: "Deal has expired" },
+        { status: 400 }
+      );
+    }
+
+    // ------------------------------------------------------
+    // 4) Create redemption (code is UNIQUE)
+    // ------------------------------------------------------
     try {
       const redemption = await prisma.redemption.create({
         data: {
           dealId: deal.id,
-          code: rawText, // full QR payload text
+          code: rawText, // full QR payload string
           // redeemedAt uses default(now())
         },
+        select: { id: true, redeemedAt: true },
       });
 
       return NextResponse.json(
@@ -124,35 +136,34 @@ export async function POST(req: NextRequest) {
         },
         { status: 200 }
       );
-    } catch (err: any) {
-      // Unique constraint -> already redeemed
-      if (err?.code === "P2002") {
-        return NextResponse.json(
-          {
-            ok: false,
-            status: "ALREADY_REDEEMED",
-            error: "This QR code has already been redeemed.",
-          },
-          { status: 409 }
-        );
+    } catch (err: unknown) {
+      // ✅ Correct Prisma error handling
+      if (err instanceof Prisma.PrismaClientKnownRequestError) {
+        // Unique constraint -> already redeemed
+        if (err.code === "P2002") {
+          return NextResponse.json(
+            {
+              ok: false,
+              status: "ALREADY_REDEEMED",
+              error: "This QR code has already been redeemed.",
+            },
+            { status: 409 }
+          );
+        }
       }
 
-      console.error("Error creating redemption:", err);
+      console.error("[/api/redemptions/confirm] create redemption error:", err);
       return NextResponse.json(
         {
           error: "Unexpected error creating redemption",
-          details: err?.message ?? String(err),
         },
         { status: 500 }
       );
     }
-  } catch (err: any) {
-    console.error("Unexpected error in /api/redemptions/confirm:", err);
+  } catch (err: unknown) {
+    console.error("[/api/redemptions/confirm] unexpected:", err);
     return NextResponse.json(
-      {
-        error: "Unexpected error confirming redemption",
-        details: err?.message ?? String(err),
-      },
+      { error: "Unexpected error confirming redemption" },
       { status: 500 }
     );
   }
