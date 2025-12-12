@@ -1,112 +1,158 @@
 // app/api/redemptions/confirm/route.ts
-import { NextResponse } from "next/server";
-import prisma from "@/lib/prisma";
+import { NextRequest, NextResponse } from "next/server";
+import { prisma } from "@/lib/prisma";
 
-export async function POST(req: Request) {
+// Shape we expect inside the QR payload text
+type DealQrPayload = {
+  type: "DEAL";
+  dealId: string;
+  expiresAt?: string;
+};
+
+export async function POST(req: NextRequest) {
   try {
-    const body = await req.json();
-    const payload = String(body?.payload || "").trim();
-
-    if (!payload) {
+    // -----------------------------
+    // 1. Read body as *text* first
+    // -----------------------------
+    const bodyText = await req.text();
+    if (!bodyText) {
       return NextResponse.json(
-        { error: "Missing QR payload." },
+        { error: "Missing request body" },
         { status: 400 }
       );
     }
 
-    // 1) Check if this exact QR text ("code") has already been redeemed
-    const already = await prisma.redemption.findUnique({
-      where: { code: payload }, // 👈 uses `code` field from Prisma model
-    });
+    let rawText: string;
 
-    if (already) {
-      return NextResponse.json(
-        {
-          error:
-            "This QR code has already been redeemed. Ask the customer to open a fresh code.",
-        },
-        { status: 400 }
-      );
-    }
-
-    // 2) Parse the QR payload
-    let parsed: any;
+    // Try to parse as JSON object first
+    // (e.g. { "qrText": "..." }). If that fails,
+    // treat the whole body as the QR text itself.
     try {
-      parsed = JSON.parse(payload);
+      const parsed = JSON.parse(bodyText);
+      if (typeof parsed === "string") {
+        rawText = parsed;
+      } else {
+        rawText =
+          parsed?.qrText ||
+          parsed?.payload ||
+          parsed?.text ||
+          parsed?.raw ||
+          parsed?.code ||
+          bodyText;
+      }
+    } catch {
+      rawText = bodyText.trim();
+    }
+
+    if (!rawText) {
+      return NextResponse.json(
+        { error: "QR text is empty" },
+        { status: 400 }
+      );
+    }
+
+    // ---------------------------------
+    // 2. Decode the QR JSON payload
+    // ---------------------------------
+    let payload: DealQrPayload;
+    try {
+      payload = JSON.parse(rawText);
     } catch {
       return NextResponse.json(
-        { error: "Invalid QR format. Could not parse payload." },
+        { error: "QR code is not valid JSON" },
         { status: 400 }
       );
     }
 
-    if (!parsed || parsed.type !== "DEAL" || !parsed.dealId) {
+    if (payload.type !== "DEAL" || !payload.dealId) {
       return NextResponse.json(
-        { error: "Invalid QR code data. Missing deal information." },
+        { error: "QR code is not a valid deal code" },
         { status: 400 }
       );
     }
 
-    const dealId: string = parsed.dealId;
-    const expiresAtIso: string | undefined = parsed.expiresAt;
-
-    // 3) Load the deal
-    const deal = await prisma.deal.findUnique({
-      where: { id: dealId },
-    });
-
-    if (!deal) {
-      return NextResponse.json(
-        { error: "Deal not found for this QR code." },
-        { status: 404 }
-      );
-    }
-
-    const now = new Date();
-
-    // Check the deal is currently valid by dates
-    if (deal.startsAt > now || deal.endsAt < now) {
-      return NextResponse.json(
-        { error: "This deal is not currently valid." },
-        { status: 400 }
-      );
-    }
-
-    // Optional: also honour expiresAt embedded in QR
-    if (expiresAtIso) {
-      const qrExpiry = new Date(expiresAtIso);
-      if (qrExpiry < now) {
+    // Optional expiry check from payload
+    if (payload.expiresAt) {
+      const expires = new Date(payload.expiresAt);
+      if (Number.isNaN(expires.getTime())) {
         return NextResponse.json(
-          { error: "This QR code has expired." },
+          { error: "QR expiry is invalid" },
+          { status: 400 }
+        );
+      }
+      if (expires < new Date()) {
+        return NextResponse.json(
+          { error: "This QR code has expired" },
           { status: 400 }
         );
       }
     }
 
-    // 4) Create redemption and lock this QR forever
-    const redemption = await prisma.redemption.create({
-      data: {
-        dealId: deal.id,
-        code: payload, // 👈 store full raw QR JSON here
-      },
+    // ---------------------------------
+    // 3. Check that the deal exists
+    // ---------------------------------
+    const deal = await prisma.deal.findUnique({
+      where: { id: payload.dealId },
     });
 
-    console.log("[Redemption] created:", redemption.id);
+    if (!deal) {
+      return NextResponse.json(
+        { error: "Deal not found for this QR code" },
+        { status: 404 }
+      );
+    }
 
-    // 5) Return summary used by RedeemForm
-    return NextResponse.json({
-      message: "Redemption successful. Code can no longer be used again.",
-      deal: {
-        id: deal.id,
-        title: deal.title,
-        originalPrice: deal.originalPrice,
-        discountValue: deal.discountValue,
-      },
-    });
-  } catch (err) {
-    console.error("Redemption confirm error:", err);
+    // ---------------------------------
+    // 4. Create a redemption
+    //    (code is UNIQUE, so re-use fails)
+    // ---------------------------------
+    try {
+      const redemption = await prisma.redemption.create({
+        data: {
+          dealId: deal.id,
+          code: rawText, // full QR payload text
+          // redeemedAt uses default(now())
+        },
+      });
+
+      return NextResponse.json(
+        {
+          ok: true,
+          status: "REDEEMED",
+          redemptionId: redemption.id,
+          redeemedAt: redemption.redeemedAt,
+        },
+        { status: 200 }
+      );
+    } catch (err: any) {
+      // Unique constraint -> already redeemed
+      if (err?.code === "P2002") {
+        return NextResponse.json(
+          {
+            ok: false,
+            status: "ALREADY_REDEEMED",
+            error: "This QR code has already been redeemed.",
+          },
+          { status: 409 }
+        );
+      }
+
+      console.error("Error creating redemption:", err);
+      return NextResponse.json(
+        {
+          error: "Unexpected error creating redemption",
+          details: err?.message ?? String(err),
+        },
+        { status: 500 }
+      );
+    }
+  } catch (err: any) {
+    console.error("Unexpected error in /api/redemptions/confirm:", err);
     return NextResponse.json(
-      { error: "Unexpected error confirming redemption." },
+      {
+        error: "Unexpected error confirming redemption",
+        details: err?.message ?? String(err),
+      },
       { status: 500 }
     );
   }
