@@ -9,7 +9,8 @@ import { prisma } from "@/lib/prisma";
 import MerchantProfileForm from "../MerchantProfileForm";
 
 export default async function MerchantProfileEditPage() {
-  const supabase = createSupabaseServer();
+  // ✅ createSupabaseServer returns a Promise → await it
+  const supabase = await createSupabaseServer();
 
   const {
     data: { user },
@@ -75,7 +76,6 @@ export default async function MerchantProfileEditPage() {
       </header>
 
       <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm sm:p-8">
-        {/* MerchantProfileForm handles logo upload + all fields + saving */}
         <MerchantProfileForm merchant={merchant} />
       </section>
     </main>

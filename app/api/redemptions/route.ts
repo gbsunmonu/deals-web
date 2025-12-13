@@ -1,98 +1,99 @@
 // app/api/redemptions/route.ts
-import { NextResponse } from "next/server";
-import prisma from "@/lib/prisma";
+import { NextRequest, NextResponse } from "next/server";
+import { prisma } from "@/lib/prisma";
 
-export async function POST(req: Request) {
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
+
+function makeShortCode(len = 6) {
+  return Math.random().toString(36).substring(2, 2 + len).toUpperCase();
+}
+
+async function generateUniqueShortCode() {
+  for (let i = 0; i < 6; i++) {
+    const shortCode = makeShortCode(6);
+    const exists = await prisma.redemption.findUnique({
+      where: { shortCode },
+      select: { id: true },
+    });
+    if (!exists) return shortCode;
+  }
+  return makeShortCode(8);
+}
+
+export async function POST(req: NextRequest) {
   try {
-    const { code } = (await req.json()) as { code?: string };
+    const body = await req.json().catch(() => ({}));
 
-    if (!code || typeof code !== "string") {
-      return NextResponse.json(
-        { error: "Missing or invalid code" },
-        { status: 400 }
-      );
+    // Expect dealId, and optionally code.
+    const dealId = body?.dealId as string | undefined;
+    if (!dealId || typeof dealId !== "string") {
+      return NextResponse.json({ error: "dealId is required" }, { status: 400 });
     }
 
-    // QR contains JSON like:
-    // {"type":"DEAL","dealId":"...","title":"...","expiresAt":"..."}
-    let payload: any;
-    try {
-      payload = JSON.parse(code);
-    } catch {
-      return NextResponse.json(
-        { error: "Code is not valid JSON" },
-        { status: 400 }
-      );
-    }
+    // If caller provided a code, use it. Otherwise generate one.
+    const providedCode = body?.code;
+    const code =
+      typeof providedCode === "string" && providedCode.trim()
+        ? providedCode.trim()
+        : await generateUniqueShortCode();
 
-    if (payload.type !== "DEAL" || !payload.dealId) {
-      return NextResponse.json(
-        { error: "Code is not a valid deal QR" },
-        { status: 400 }
-      );
-    }
-
+    // Ensure deal exists
     const deal = await prisma.deal.findUnique({
-      where: { id: payload.dealId as string },
+      where: { id: dealId },
+      select: { id: true },
     });
 
     if (!deal) {
-      return NextResponse.json(
-        { error: "Deal not found for this code" },
-        { status: 404 }
-      );
+      return NextResponse.json({ error: "Deal not found" }, { status: 404 });
     }
 
-    const now = new Date();
-
-    if (deal.startsAt > now) {
-      return NextResponse.json(
-        { error: "Deal is not active yet" },
-        { status: 400 }
-      );
-    }
-
-    if (deal.endsAt < now) {
-      return NextResponse.json(
-        { error: "Deal has expired" },
-        { status: 400 }
-      );
-    }
-
+    // Create redemption row (NOT redeemed yet unless your UI expects it)
+    // ✅ IMPORTANT: shortCode is REQUIRED by your Prisma schema.
+    // Keep it aligned with `code` so scans can find it either way.
     try {
       const redemption = await prisma.redemption.create({
         data: {
           dealId: deal.id,
           code,
+          shortCode: code,
+        },
+        select: {
+          id: true,
+          code: true,
+          shortCode: true,
+          redeemedAt: true,
         },
       });
 
-      return NextResponse.json(
-        {
-          message: "Redemption successful",
-          redemption,
-        },
-        { status: 201 }
-      );
+      return NextResponse.json(redemption, { status: 201 });
     } catch (err: any) {
-      // unique constraint on `code` -> same QR used twice
+      // Unique constraint collision: try again with a new code
       if (err?.code === "P2002") {
-        return NextResponse.json(
-          { error: "This code has already been redeemed" },
-          { status: 400 }
-        );
+        const fallback = await generateUniqueShortCode();
+        const redemption = await prisma.redemption.create({
+          data: {
+            dealId: deal.id,
+            code: fallback,
+            shortCode: fallback,
+          },
+          select: {
+            id: true,
+            code: true,
+            shortCode: true,
+            redeemedAt: true,
+          },
+        });
+
+        return NextResponse.json(redemption, { status: 201 });
       }
 
-      console.error("Error creating redemption:", err);
-      return NextResponse.json(
-        { error: "Unexpected error redeeming code" },
-        { status: 500 }
-      );
+      throw err;
     }
-  } catch (err) {
-    console.error("Error in POST /api/redemptions:", err);
+  } catch (err: any) {
+    console.error("[/api/redemptions] error:", err);
     return NextResponse.json(
-      { error: "Server error while redeeming code" },
+      { error: "Failed to create redemption", details: err?.message ?? String(err) },
       { status: 500 }
     );
   }

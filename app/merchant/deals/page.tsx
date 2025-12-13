@@ -16,12 +16,14 @@ function getDealStatus(startsAt: Date, endsAt: Date): DealStatus {
 }
 
 function formatNaira(value: number | null | undefined) {
-  if (value == null || isNaN(value)) return "—";
+  if (value == null || Number.isNaN(value)) return "—";
   return `₦${value.toLocaleString("en-NG")}`;
 }
 
 export default async function MerchantDealsPage() {
-  const supabase = createSupabaseServer();
+  // ✅ Next.js 16: createSupabaseServer() is async
+  const supabase = await createSupabaseServer();
+
   const {
     data: { user },
   } = await supabase.auth.getUser();
@@ -35,7 +37,6 @@ export default async function MerchantDealsPage() {
   });
 
   if (!merchant) {
-    // No merchant profile yet – send them to merchant home
     redirect("/merchant/profile");
   }
 
@@ -44,19 +45,17 @@ export default async function MerchantDealsPage() {
     orderBy: { startsAt: "desc" },
   });
 
-  // Small debug log (you can keep or remove)
   console.log(
     "[MyDeals] discounts:",
     deals.map((d) => ({
       id: d.id,
       title: d.title,
       discountValue: d.discountValue,
-    })),
+    }))
   );
 
   return (
     <main className="mx-auto max-w-6xl px-4 py-10">
-      {/* Header */}
       <header className="mb-6 flex flex-wrap items-center justify-between gap-3">
         <div>
           <p className="text-xs font-semibold tracking-[0.18em] text-emerald-500">
@@ -78,7 +77,6 @@ export default async function MerchantDealsPage() {
         </Link>
       </header>
 
-      {/* Deals list */}
       {deals.length === 0 ? (
         <div className="rounded-3xl border border-dashed border-slate-200 bg-slate-50 px-6 py-10 text-center text-sm text-slate-500">
           You haven&apos;t created any deals yet.{" "}
@@ -95,38 +93,29 @@ export default async function MerchantDealsPage() {
           {deals.map((deal) => {
             const status = getDealStatus(deal.startsAt, deal.endsAt);
 
-            const rawDiscount = deal.discountValue;
             const discount =
-              typeof rawDiscount === "number"
-                ? rawDiscount
-                : rawDiscount == null
-                ? 0
-                : Number(rawDiscount as any);
-
-            const hasDiscount = discount > 0 && deal.originalPrice != null;
+              typeof deal.discountValue === "number"
+                ? deal.discountValue
+                : Number(deal.discountValue ?? 0);
 
             const original = deal.originalPrice ?? 0;
-            const discountedPrice =
-              hasDiscount && original > 0
-                ? Math.round(original - (original * discount) / 100)
-                : original || null;
+            const hasDiscount = discount > 0 && original > 0;
 
-            const startsAt = deal.startsAt;
-            const endsAt = deal.endsAt;
+            const discountedPrice = hasDiscount
+              ? Math.round(original - (original * discount) / 100)
+              : original || null;
 
             return (
               <li
                 key={deal.id}
                 className="flex flex-col gap-3 rounded-3xl border border-slate-200 bg-white px-5 py-4 shadow-sm md:flex-row md:items-center md:justify-between"
               >
-                {/* Left side: basic info */}
                 <div className="min-w-0 flex-1 space-y-1">
                   <div className="flex items-center gap-2">
                     <p className="truncate text-sm font-semibold text-slate-900">
                       {deal.title}
                     </p>
 
-                    {/* Status pill */}
                     <span
                       className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-semibold ${
                         status === "ACTIVE"
@@ -143,30 +132,27 @@ export default async function MerchantDealsPage() {
                         : "Ended"}
                     </span>
 
-                    {/* Discount pill – THIS is the one that was empty before */}
                     <span className="inline-flex items-center rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-semibold text-emerald-700">
                       {discount > 0 ? `${discount}% OFF` : "No discount set"}
                     </span>
                   </div>
 
-                  {/* Dates */}
                   <p className="text-xs text-slate-500">
-                    {startsAt.toLocaleDateString("en-NG", {
+                    {deal.startsAt.toLocaleDateString("en-NG", {
                       day: "2-digit",
                       month: "short",
                       year: "numeric",
                     })}{" "}
                     –{" "}
-                    {endsAt.toLocaleDateString("en-NG", {
+                    {deal.endsAt.toLocaleDateString("en-NG", {
                       day: "2-digit",
                       month: "short",
                       year: "numeric",
                     })}
                   </p>
 
-                  {/* Price summary */}
                   <p className="text-xs text-slate-500">
-                    {hasDiscount && discountedPrice != null && original > 0 ? (
+                    {hasDiscount && discountedPrice != null ? (
                       <>
                         From{" "}
                         <span className="line-through">
@@ -185,7 +171,6 @@ export default async function MerchantDealsPage() {
                   </p>
                 </div>
 
-                {/* Right side: actions */}
                 <div className="flex flex-shrink-0 items-center gap-2">
                   <Link
                     href={`/deals/${deal.id}`}

@@ -1,196 +1,171 @@
 // app/api/redeem/route.ts
 import { NextRequest, NextResponse } from "next/server";
-import prisma from "@/lib/prisma";
+import { prisma } from "@/lib/prisma";
 
 export const dynamic = "force-dynamic";
+export const revalidate = 0;
 
-type DealQrPayload = {
-  v: number;
-  type: "deal-redemption";
-  dealId: string;
-  code: string;
-  issuedAt: string;
-  expiresAt: string;
-};
+// Simple code generator (uppercase, URL-safe-ish)
+function makeShortCode(len = 6) {
+  return Math.random().toString(36).substring(2, 2 + len).toUpperCase();
+}
 
-function badRequest(message: string, statusCode = 400) {
-  return NextResponse.json(
-    {
-      ok: false,
-      status: "INVALID",
-      message,
-    },
-    { status: statusCode }
-  );
+async function generateUniqueShortCode() {
+  // Try a few times to avoid collisions
+  for (let i = 0; i < 6; i++) {
+    const shortCode = makeShortCode(6);
+    const exists = await prisma.redemption.findUnique({
+      where: { shortCode },
+      select: { id: true },
+    });
+    if (!exists) return shortCode;
+  }
+  // fallback
+  return makeShortCode(8);
 }
 
 export async function POST(req: NextRequest) {
   try {
-    const body = await req.json().catch(() => null);
-
-    if (!body) {
-      return badRequest("Missing JSON body.");
+    // Accept either JSON or raw text payloads
+    const bodyText = await req.text();
+    if (!bodyText) {
+      return NextResponse.json({ error: "Missing request body" }, { status: 400 });
     }
 
-    // We allow either { payload: "json-string" } or { payload: { ..object.. } }
-    let rawPayload = (body as any).payload ?? body.payload ?? body;
-
-    if (!rawPayload) {
-      return badRequest("Missing `payload` in request body.");
-    }
-
-    let payload: DealQrPayload;
-
+    let payload: any = null;
     try {
-      if (typeof rawPayload === "string") {
-        payload = JSON.parse(rawPayload);
-      } else {
-        payload = rawPayload as DealQrPayload;
+      payload = JSON.parse(bodyText);
+    } catch {
+      // If it's not JSON, treat it as a raw code string
+      payload = { code: bodyText.trim() };
+    }
+
+    // Expected minimum:
+    // payload.dealId (preferred) OR payload.dealSlug (if you use slugs)
+    // payload.code OR payload.qrText / payload.text (from scanner)
+    const dealId = payload?.dealId as string | undefined;
+
+    // If your project uses slug instead of id, you can extend this easily,
+    // but we won't guess that without seeing schema usage in this file.
+    if (!dealId || typeof dealId !== "string") {
+      return NextResponse.json({ error: "dealId is required" }, { status: 400 });
+    }
+
+    const raw =
+      payload?.code ??
+      payload?.qrText ??
+      payload?.text ??
+      payload?.payload ??
+      payload?.raw ??
+      "";
+
+    if (!raw || typeof raw !== "string") {
+      return NextResponse.json({ error: "code is required" }, { status: 400 });
+    }
+
+    const rawText = raw.trim();
+    if (!rawText) {
+      return NextResponse.json({ error: "code is empty" }, { status: 400 });
+    }
+
+    // If the scanned value is a URL like https://domain.com/r/ABC123, extract the last path segment
+    let code = rawText;
+    if (/^https?:\/\//i.test(rawText)) {
+      try {
+        const u = new URL(rawText);
+        const parts = u.pathname.split("/").filter(Boolean);
+        if (parts.length) code = parts[parts.length - 1];
+      } catch {
+        // leave `code` as rawText
       }
-    } catch (err) {
-      return badRequest("Could not parse QR payload JSON.");
     }
 
-    // Basic validation of expected fields
-    if (payload.v !== 1) {
-      return badRequest("Unsupported payload version.");
-    }
-
-    if (payload.type !== "deal-redemption") {
-      return badRequest("Unsupported payload type.");
-    }
-
-    if (!payload.dealId || !payload.code) {
-      return badRequest("Payload missing dealId or code.");
-    }
-
-    const expiresAt = new Date(payload.expiresAt);
-    if (Number.isNaN(expiresAt.getTime())) {
-      return badRequest("Invalid expiresAt value.");
-    }
-
-    const now = new Date();
-    if (expiresAt.getTime() < now.getTime()) {
-      return NextResponse.json(
-        {
-          ok: false,
-          status: "EXPIRED",
-          message: "This QR code has expired.",
-        },
-        { status: 410 }
-      );
-    }
-
-    // 1) Check if this QR `code` was already redeemed
-    const existingRedemption = await prisma.redemption.findUnique({
-      where: { code: payload.code },
+    // 1) Ensure deal exists
+    const deal = await prisma.deal.findUnique({
+      where: { id: dealId },
+      select: { id: true },
     });
 
-    if (existingRedemption) {
+    if (!deal) {
+      return NextResponse.json({ error: "Deal not found" }, { status: 404 });
+    }
+
+    // 2) Find existing redemption by code/shortCode (to avoid double redeem)
+    const existing = await prisma.redemption.findFirst({
+      where: {
+        OR: [{ code }, { shortCode: code }],
+      },
+      select: { id: true, redeemedAt: true },
+    });
+
+    if (existing?.redeemedAt) {
       return NextResponse.json(
-        {
-          ok: false,
-          status: "ALREADY_REDEEMED",
-          message: "This QR code has already been used.",
-          redeemedAt: existingRedemption.redeemedAt,
-        },
+        { ok: false, status: "ALREADY_REDEEMED", error: "This code has already been redeemed." },
         { status: 409 }
       );
     }
 
-    // 2) Fetch the deal (with merchant) from DB
-    const deal = await prisma.deal.findUnique({
-      where: { id: payload.dealId },
-      include: {
-        merchant: {
-          select: {
-            id: true,
-            name: true,
-            city: true,
-            address: true,
-            phone: true,
-          },
-        },
-      },
-    });
+    // 3) If redemption exists but not redeemed, mark as redeemed.
+    // Otherwise create a redemption and mark as redeemed.
+    const now = new Date();
 
-    if (!deal) {
+    if (existing && !existing.redeemedAt) {
+      const updated = await prisma.redemption.update({
+        where: { id: existing.id },
+        data: { redeemedAt: now },
+        select: { id: true, redeemedAt: true, shortCode: true },
+      });
+
       return NextResponse.json(
         {
-          ok: false,
-          status: "INVALID_DEAL",
-          message: "Deal not found for this QR code.",
+          ok: true,
+          status: "REDEEMED",
+          message: "Redemption successful.",
+          redemption: { id: updated.id, redeemedAt: updated.redeemedAt, shortCode: updated.shortCode },
         },
-        { status: 404 }
+        { status: 200 }
       );
     }
 
-    // Optional: double-check the deal's own date range
-    if (deal.startsAt > now || deal.endsAt < now) {
+    // ✅ IMPORTANT FIX:
+    // Prisma requires `shortCode` in Redemption create. We set it.
+    // We keep `code` and `shortCode` aligned so either lookup works.
+    const shortCode = await generateUniqueShortCode();
+
+    try {
+      const redemption = await prisma.redemption.create({
+        data: {
+          dealId: deal.id,
+          code,              // scanned/entered code
+          shortCode,         // REQUIRED by your Prisma schema
+          redeemedAt: now,   // this route is "redeem now"
+        },
+        select: { id: true, redeemedAt: true, shortCode: true },
+      });
+
       return NextResponse.json(
         {
-          ok: false,
-          status: "OUT_OF_RANGE",
-          message: "This deal is not valid on today's date.",
+          ok: true,
+          status: "REDEEMED",
+          message: "Redemption successful.",
+          redemption: { id: redemption.id, redeemedAt: redemption.redeemedAt, shortCode: redemption.shortCode },
         },
-        { status: 400 }
+        { status: 200 }
       );
+    } catch (err: any) {
+      // In case of unique collision
+      if (err?.code === "P2002") {
+        return NextResponse.json(
+          { ok: false, status: "ALREADY_REDEEMED", error: "This code has already been redeemed." },
+          { status: 409 }
+        );
+      }
+      throw err;
     }
-
-    // 3) Create the redemption row (this marks the code as "used")
-    const redemption = await prisma.redemption.create({
-      data: {
-        dealId: deal.id,
-        code: payload.code,
-      },
-    });
-
-    // 4) Calculate discount info for the response (optional but nice for UI)
-    const original = deal.originalPrice ?? 0;
-    const discount = deal.discountValue ?? 0;
-
-    const hasDiscount = discount > 0 && original > 0;
-    const discountedPrice = hasDiscount
-      ? Math.round(original - (original * discount) / 100)
-      : original || null;
-
-    const savingsAmount =
-      hasDiscount && discountedPrice != null
-        ? original - discountedPrice
-        : null;
-
-    return NextResponse.json(
-      {
-        ok: true,
-        status: "REDEEMED",
-        message: "QR code redeemed successfully.",
-        deal: {
-          id: deal.id,
-          title: deal.title,
-          originalPrice: deal.originalPrice,
-          discountValue: deal.discountValue,
-          discountType: deal.discountType,
-          discountedPrice,
-          savingsAmount,
-          startsAt: deal.startsAt,
-          endsAt: deal.endsAt,
-        },
-        merchant: deal.merchant,
-        redemption: {
-          id: redemption.id,
-          redeemedAt: redemption.redeemedAt,
-        },
-      },
-      { status: 200 }
-    );
   } catch (err: any) {
-    console.error("[Redeem] Unexpected error:", err);
+    console.error("[/api/redeem] error:", err);
     return NextResponse.json(
-      {
-        ok: false,
-        status: "SERVER_ERROR",
-        message: "Something went wrong while redeeming this QR code.",
-      },
+      { error: "Unexpected error redeeming deal", details: err?.message ?? String(err) },
       { status: 500 }
     );
   }

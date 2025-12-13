@@ -8,11 +8,6 @@ type RedeemPageProps = {
   params: { code: string };
 };
 
-function formatNaira(value: number | null | undefined) {
-  if (value == null || isNaN(value as any)) return "—";
-  return `₦${Number(value).toLocaleString("en-NG")}`;
-}
-
 export default async function RedeemPage({ params }: RedeemPageProps) {
   const rawCode = params.code?.trim();
 
@@ -20,9 +15,9 @@ export default async function RedeemPage({ params }: RedeemPageProps) {
     return notFound();
   }
 
-  // 🔑 IMPORTANT: use `code` (the unique field), not `shortCode`
-  const redemption = await prisma.redemption.findUnique({
-    where: { code: rawCode },
+  // Accept either a short code or the underlying `code` field
+  const redemption = await prisma.redemption.findFirst({
+    where: { OR: [{ shortCode: rawCode }, { code: rawCode }] },
     include: {
       deal: {
         include: {
@@ -63,6 +58,8 @@ export default async function RedeemPage({ params }: RedeemPageProps) {
   const deal = redemption.deal;
   const merchant = deal.merchant;
 
+  const redeemedAt = redemption.redeemedAt;
+
   return (
     <main className="mx-auto max-w-md px-4 py-10">
       <section className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
@@ -70,18 +67,16 @@ export default async function RedeemPage({ params }: RedeemPageProps) {
           Dealina · Redemption
         </p>
         <h1 className="mt-2 text-xl font-semibold text-slate-900">
-          Code verified
+          {redeemedAt ? "Code redeemed" : "Code ready to redeem"}
         </h1>
 
         <p className="mt-2 text-sm text-slate-600">
-          This code belongs to the deal below. The merchant can now choose to
-          honor it and mark it as used in their own system.
+          This code belongs to the deal below. Show this screen to the merchant.
+          They can redeem it from their scanner/merchant tools.
         </p>
 
         <div className="mt-5 rounded-2xl bg-slate-50 p-4 text-left text-sm">
-          <p className="text-xs font-medium uppercase text-slate-500">
-            Deal
-          </p>
+          <p className="text-xs font-medium uppercase text-slate-500">Deal</p>
           <p className="mt-1 font-semibold text-slate-900">{deal.title}</p>
           {deal.description && (
             <p className="mt-1 text-xs text-slate-500 line-clamp-3">
@@ -103,17 +98,19 @@ export default async function RedeemPage({ params }: RedeemPageProps) {
             </div>
             <div className="text-right">
               <p className="text-[11px] font-medium uppercase text-slate-500">
-                Redeemed at
+                Status
               </p>
               <p className="mt-1 text-xs text-slate-700">
-                {redemption.redeemedAt.toLocaleString("en-NG", {
-                  day: "2-digit",
-                  month: "short",
-                  year: "numeric",
-                  hour: "2-digit",
-                  minute: "2-digit",
-                  hour12: true,
-                })}
+                {redeemedAt
+                  ? `Redeemed ${redeemedAt.toLocaleString("en-NG", {
+                      day: "2-digit",
+                      month: "short",
+                      year: "numeric",
+                      hour: "2-digit",
+                      minute: "2-digit",
+                      hour12: true,
+                    })}`
+                  : "Not redeemed yet"}
               </p>
             </div>
           </div>

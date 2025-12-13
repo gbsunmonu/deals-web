@@ -1,12 +1,12 @@
-// app/api/merchant/profile/route.ts
-
+// deals-web/app/api/merchant/profile/route.ts
 import { NextResponse } from "next/server";
-import { prisma } from "@/lib/prisma";
 import { createSupabaseServer } from "@/lib/supabase-server";
+import { prisma } from "@/lib/prisma";
 
 export async function POST(req: Request) {
   try {
-    const supabase = createSupabaseServer();
+    const supabase = await createSupabaseServer(); // ✅ IMPORTANT
+
     const {
       data: { user },
       error: authError,
@@ -14,68 +14,67 @@ export async function POST(req: Request) {
 
     if (authError) {
       console.error("[POST /api/merchant/profile] auth error:", authError);
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
     if (!user) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
+    const body = await req.json();
+
+    const {
+      name,
+      description,
+      category,
+      city,
+      address,
+      phone,
+      website,
+      logoUrl,
+    } = body;
+
+    if (!name) {
       return NextResponse.json(
-        { error: "Not authenticated" },
-        { status: 401 },
+        { error: "Business name is required" },
+        { status: 400 }
       );
     }
 
-    const body = (await req.json().catch(() => ({}))) as {
-      name?: string;
-      description?: string;
-      category?: string;
-      city?: string;
-      address?: string;
-      phone?: string;
-      website?: string;
-    };
-
-    const name =
-      (body.name ?? "").trim() ||
-      (user.user_metadata?.business_name as string | undefined) ||
-      user.email?.split("@")[0] ||
-      "New merchant";
-
-    const description = (body.description ?? "").trim();
-    const category = (body.category ?? "").trim();
-    const city = (body.city ?? "").trim();
-    const address = (body.address ?? "").trim();
-    const phone = (body.phone ?? "").trim();
-    const website = (body.website ?? "").trim();
-
-    // Upsert merchant row by userId (unique)
     const merchant = await prisma.merchant.upsert({
       where: { userId: user.id },
       update: {
         name,
-        description,
-        category,
-        city,
-        address,
-        phone,
-        website,
+        description: description ?? "",
+        category: category ?? "",
+        city: city ?? "",
+        address: address ?? "",
+        phone: phone ?? "",
+        website: website ?? "",
+        avatarUrl: logoUrl ?? null,
       },
       create: {
         userId: user.id,
         name,
-        description,
-        category,
-        city,
-        address,
-        phone,
-        website,
+        description: description ?? "",
+        category: category ?? "",
+        city: city ?? "",
+        address: address ?? "",
+        phone: phone ?? "",
+        website: website ?? "",
+        avatarUrl: logoUrl ?? null,
       },
     });
 
-    return NextResponse.json({ ok: true, merchant }, { status: 200 });
+    return NextResponse.json(
+      { message: "Profile saved", merchant },
+      { status: 200 }
+    );
   } catch (err) {
-    console.error("Save merchant profile error:", err);
+    console.error("[POST /api/merchant/profile] error:", err);
     return NextResponse.json(
       { error: "Failed to save profile" },
-      { status: 500 },
+      { status: 500 }
     );
   }
 }

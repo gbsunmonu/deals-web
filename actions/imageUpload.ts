@@ -1,30 +1,19 @@
-// actions/imageUpload.ts
-'use server';
+// deals-web/actions/imageUpload.ts
+"use server";
 
-import { createSupabaseServer } from '@/lib/supabase-server';
-import { randomUUID } from 'crypto';
+import { randomUUID } from "crypto";
+import { createSupabaseServer } from "@/lib/supabase-server";
 
-/**
- * Creates a signed upload URL for a deal image in the `deals` bucket.
- * You must have a public bucket called `deals` in Supabase Storage.
- */
-export async function getDealUploadTarget(merchantId: string) {
-  const supabase = createSupabaseServer();
+export async function createImageUploadUrl(merchantId: string) {
+  const supabase = await createSupabaseServer(); // ✅ FIX
 
   const objectName = `m_${merchantId}/${randomUUID()}.jpg`;
 
   const { data, error } = await supabase.storage
-    .from('deals')
+    .from("deals")
     .createSignedUploadUrl(objectName);
 
-  if (error) {
-    console.error('signed upload error', error);
-    throw new Error('Could not create upload URL');
-  }
+  if (error) throw new Error(error.message);
 
-  return {
-    path: objectName,
-    url: data.signedUrl,
-    token: data.token,
-  };
+  return { objectName, ...data };
 }

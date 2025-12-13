@@ -1,14 +1,14 @@
-// app/auth/callback/route.ts
+// deals-web/app/auth/callback/route.ts
 import { NextResponse } from "next/server";
 import { createSupabaseServer } from "@/lib/supabase-server";
 
 export async function GET(request: Request) {
-  const { searchParams } = new URL(request.url);
-  const code = searchParams.get("code");
-  const next = searchParams.get("next") ?? "/";
+  const url = new URL(request.url);
+  const code = url.searchParams.get("code");
+  const next = url.searchParams.get("next") ?? "/";
 
   if (code) {
-    const supabase = createSupabaseServer();
+    const supabase = await createSupabaseServer(); // ✅ await
     await supabase.auth.exchangeCodeForSession(code);
   }
 

@@ -1,14 +1,14 @@
 "use client";
 
-import { useEffect, useState, useTransition } from "react";
+import { useState, useTransition } from "react";
 import QRCode from "react-qr-code";
 
 type Redemption = {
   id: string;
   code: string;
   shortCode: string;
-  redeemed: boolean;
-  createdAt: string;
+  redeemedAt?: string | null;
+  createdAt?: string;
 };
 
 interface Props {
@@ -16,45 +16,20 @@ interface Props {
 }
 
 export default function DealQRCodeSection({ dealId }: Props) {
-  const [clientId, setClientId] = useState<string | null>(null);
   const [redemption, setRedemption] = useState<Redemption | null>(null);
   const [qrUrl, setQrUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isPending, startTransition] = useTransition();
 
-  // Create/load a stable device ID in localStorage
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-
-    let id = window.localStorage.getItem("coupon_client_id");
-    if (!id) {
-      if (window.crypto?.randomUUID) {
-        id = window.crypto.randomUUID();
-      } else {
-        id = Math.random().toString(36).slice(2);
-      }
-      window.localStorage.setItem("coupon_client_id", id);
-    }
-    setClientId(id);
-  }, []);
-
   const handleGenerate = () => {
     setError(null);
-
-    if (!clientId) {
-      setError("Unable to identify this device. Please refresh the page.");
-      return;
-    }
 
     startTransition(async () => {
       try {
         const res = await fetch("/api/redemptions/create", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            dealId,
-            clientId,
-          }),
+          body: JSON.stringify({ dealId }),
         });
 
         if (!res.ok) {
@@ -85,7 +60,6 @@ export default function DealQRCodeSection({ dealId }: Props) {
         <>
           <p className="mb-3 text-xs text-gray-600">
             Tap the button below to generate a unique QR code for this deal.
-            You can only have one QR code for this deal on this device.
           </p>
           <button
             type="button"
@@ -95,11 +69,7 @@ export default function DealQRCodeSection({ dealId }: Props) {
           >
             {isPending ? "Generating..." : "Generate QR code"}
           </button>
-          {error && (
-            <p className="mt-2 text-xs text-red-600">
-              {error}
-            </p>
-          )}
+          {error && <p className="mt-2 text-xs text-red-600">{error}</p>}
         </>
       ) : (
         <div className="flex flex-col items-start gap-4 md:flex-row md:items-center">
@@ -115,11 +85,6 @@ export default function DealQRCodeSection({ dealId }: Props) {
             <p className="mb-1 break-all">
               <span className="font-semibold">Link:</span>{" "}
               <span className="font-mono">{qrUrl}</span>
-            </p>
-
-            <p className="mt-3 text-[11px] text-gray-500">
-              This QR code is tied to this device. You can&apos;t generate
-              another QR code for this deal from the same device.
             </p>
           </div>
         </div>
