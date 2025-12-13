@@ -8,7 +8,6 @@ type Redemption = {
   code: string;
   shortCode: string;
   redeemedAt?: string | null;
-  createdAt?: string;
 };
 
 interface Props {
@@ -21,7 +20,9 @@ export default function DealQRCodeSection({ dealId }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [isPending, startTransition] = useTransition();
 
-  const handleGenerate = () => {
+  const baseUrl = process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000";
+
+  const generate = () => {
     setError(null);
 
     startTransition(async () => {
@@ -32,43 +33,51 @@ export default function DealQRCodeSection({ dealId }: Props) {
           body: JSON.stringify({ dealId }),
         });
 
+        const data = await res.json().catch(() => ({}));
+
         if (!res.ok) {
-          const data = await res.json().catch(() => ({}));
           throw new Error(data.error || "Failed to create redemption");
         }
 
-        const data = (await res.json()) as Redemption;
-        setRedemption(data);
+        const r = data as Redemption;
+        setRedemption(r);
 
-        const baseUrl =
-          process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000";
-
-        const url = `${baseUrl}/r/${data.shortCode}`;
+        const url = `${baseUrl}/r/${r.shortCode}`;
         setQrUrl(url);
       } catch (err: any) {
         console.error(err);
-        setError(err.message || "Something went wrong");
+        setError(err?.message || "Something went wrong");
       }
     });
+  };
+
+  const clear = () => {
+    setError(null);
+    setRedemption(null);
+    setQrUrl(null);
   };
 
   return (
     <section className="rounded-lg border bg-white p-4 shadow-sm text-sm">
       <h2 className="mb-2 text-base font-semibold">Get QR code</h2>
 
-      {!redemption || !qrUrl ? (
+      <p className="mb-3 text-xs text-gray-600">
+        Each QR code is <span className="font-semibold">single-use</span>. If the
+        merchant redeems it, generate a new QR code for another redemption
+        (until the deal expires).
+      </p>
+
+      {!qrUrl || !redemption ? (
         <>
-          <p className="mb-3 text-xs text-gray-600">
-            Tap the button below to generate a unique QR code for this deal.
-          </p>
           <button
             type="button"
-            onClick={handleGenerate}
+            onClick={generate}
             disabled={isPending}
             className="inline-flex items-center rounded-md bg-black px-4 py-2 text-xs font-medium text-white hover:bg-gray-900 disabled:opacity-60"
           >
             {isPending ? "Generating..." : "Generate QR code"}
           </button>
+
           {error && <p className="mt-2 text-xs text-red-600">{error}</p>}
         </>
       ) : (
@@ -82,10 +91,31 @@ export default function DealQRCodeSection({ dealId }: Props) {
               <span className="font-semibold">Short code:</span>{" "}
               <span className="font-mono text-sm">{redemption.shortCode}</span>
             </p>
-            <p className="mb-1 break-all">
+            <p className="mb-3 break-all">
               <span className="font-semibold">Link:</span>{" "}
               <span className="font-mono">{qrUrl}</span>
             </p>
+
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={generate}
+                disabled={isPending}
+                className="inline-flex items-center rounded-md bg-emerald-600 px-4 py-2 text-xs font-medium text-white hover:bg-emerald-700 disabled:opacity-60"
+              >
+                {isPending ? "Generating..." : "Generate another QR"}
+              </button>
+
+              <button
+                type="button"
+                onClick={clear}
+                className="inline-flex items-center rounded-md border border-gray-200 bg-white px-4 py-2 text-xs font-medium text-gray-900 hover:bg-gray-50"
+              >
+                Clear
+              </button>
+            </div>
+
+            {error && <p className="mt-2 text-xs text-red-600">{error}</p>}
           </div>
         </div>
       )}
