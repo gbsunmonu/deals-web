@@ -3,18 +3,25 @@ import Link from "next/link";
 import prisma from "@/lib/prisma";
 import DealCard from "@/components/DealCard";
 
+type ExploreSearchParams = Record<string, string | string[] | undefined>;
+
 type ExplorePageProps = {
-  searchParams?: {
-    q?: string;
-    category?: string;
-  };
+  // Next 16 / Turbopack may pass this as a Promise in some cases.
+  searchParams?: ExploreSearchParams | Promise<ExploreSearchParams>;
 };
 
 export const dynamic = "force-dynamic";
 
+function firstString(v: string | string[] | undefined) {
+  if (Array.isArray(v)) return v[0] ?? "";
+  return v ?? "";
+}
+
 export default async function ExplorePage({ searchParams }: ExplorePageProps) {
-  const q = (searchParams?.q ?? "").trim();
-  const category = (searchParams?.category ?? "").trim();
+  const sp = (await Promise.resolve(searchParams)) ?? {};
+
+  const q = firstString(sp.q).trim();
+  const category = firstString(sp.category).trim();
 
   const now = new Date();
 

@@ -2,7 +2,8 @@
 import prisma from "@/lib/prisma";
 import RedeemForm from "@/components/RedeemForm";
 
-const MERCHANT_ID = "5b635f61-8a37-4b25-b21b-f02e8547edad"; // same dummy ID you use elsewhere
+const MERCHANT_ID =
+  process.env.DEMO_MERCHANT_ID || "5b635f61-8a37-4b25-b21b-f02e8547edad";
 
 function formatCurrency(amount: number | null | undefined) {
   if (amount == null || Number.isNaN(amount)) return "-";
@@ -112,9 +113,7 @@ export default async function MerchantRedemptionsPage() {
                         </div>
                       </td>
                       <td className="px-3 py-2 align-top text-gray-700">
-                        {deal.discountValue
-                          ? `${deal.discountValue}%`
-                          : "—"}
+                        {deal.discountValue ? `${deal.discountValue}%` : "—"}
                       </td>
                       <td className="px-3 py-2 align-top text-gray-700">
                         {formatCurrency(original)}
