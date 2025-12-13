@@ -3,21 +3,7 @@
 import { useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 
-type RedeemResponse =
-  | {
-      ok: true;
-      status: "REDEEMED";
-      message?: string;
-      deal?: { id: string; title?: string };
-      merchant?: { id: string; name?: string };
-      redemption?: { id: string; redeemedAt?: string };
-    }
-  | {
-      ok?: false;
-      status?: string;
-      error?: string;
-      redeemedAt?: string;
-    };
+type AnyObj = Record<string, any>;
 
 function prettifyTime(iso?: string) {
   if (!iso) return "";
@@ -37,10 +23,8 @@ export default function RedeemForm() {
 
   const [text, setText] = useState("");
   const [scanInfo, setScanInfo] = useState<string | null>(null);
-
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
-
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   const canRedeem = useMemo(() => text.trim().length > 0 && !isSubmitting, [
@@ -48,9 +32,19 @@ export default function RedeemForm() {
     isSubmitting,
   ]);
 
-  async function redeemNow() {
+  function resetMessages() {
     setErrorMsg(null);
     setSuccessMsg(null);
+  }
+
+  function onTextChange(v: string) {
+    setText(v);
+    resetMessages();
+    setScanInfo(v.trim() ? "QR code scanned. You can now redeem." : null);
+  }
+
+  async function redeemNow() {
+    resetMessages();
 
     const payload = text.trim();
     if (!payload) {
@@ -60,128 +54,87 @@ export default function RedeemForm() {
 
     setIsSubmitting(true);
     try {
-      // Send scanned text / URL / JSON into confirm endpoint
       const res = await fetch("/api/redemptions/confirm", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        // We always send the raw scanned text. Your API supports URL / code / JSON.
         body: JSON.stringify({ qrText: payload }),
       });
 
-      const data = (await res.json().catch(() => ({}))) as RedeemResponse;
+      let data: AnyObj = {};
+      try {
+        data = await res.json();
+      } catch {
+        data = {};
+      }
 
-      if (res.ok && (data as any)?.ok) {
-        const dealTitle = (data as any)?.deal?.title;
-        const redeemedAt = (data as any)?.redemption?.redeemedAt;
+      // --- Normalize common response shapes --------------------------
+      const status = String(data?.status ?? "").toUpperCase();
+      const okFlag = data?.ok === true;
+      const hasError = typeof data?.error === "string" && data.error.trim() !== "";
 
-        setSuccessMsg(
-          dealTitle
-            ? `✅ Redeemed successfully: ${dealTitle}${
-                redeemedAt ? ` • ${prettifyTime(redeemedAt)}` : ""
-              }`
-            : `✅ Redeemed successfully${
-                redeemedAt ? ` • ${prettifyTime(redeemedAt)}` : ""
-              }`
-        );
+      // Some APIs return { message }, some return { error }, some return only status.
+      const message = (data?.message as string | undefined) ?? undefined;
+      const error = (data?.error as string | undefined) ?? undefined;
 
-        // Clear the input so merchant doesn't accidentally re-submit same code
+      // Already redeemed cases (can be 409, or status flag)
+      if (res.status === 409 || status === "ALREADY_REDEEMED") {
+        setErrorMsg("This QR code has already been redeemed.");
+        return;
+      }
+
+      // Not found
+      if (res.status === 404) {
+        setErrorMsg("Redemption code not found. Please rescan the QR.");
+        return;
+      }
+
+      // If server responded with an error string
+      if (!res.ok || hasError) {
+        setErrorMsg(error || "Failed to redeem. Try again.");
+        return;
+      }
+
+      // ✅ SUCCESS detection (more permissive):
+      // - any 2xx response is success
+      // - OR explicit ok:true
+      // - OR status === REDEEMED
+      const isSuccess = res.ok || okFlag || status === "REDEEMED";
+
+      if (isSuccess) {
+        const dealTitle =
+          data?.deal?.title ||
+          data?.dealTitle ||
+          data?.deal?.name ||
+          undefined;
+
+        const redeemedAt =
+          data?.redemption?.redeemedAt ||
+          data?.redeemedAt ||
+          undefined;
+
+        const when = prettifyTime(redeemedAt);
+        const base =
+          message ||
+          (dealTitle ? `✅ Redeemed successfully: ${dealTitle}` : "✅ Redeemed successfully");
+
+        setSuccessMsg(when ? `${base} • ${when}` : base);
+
+        // Clear input to prevent accidental re-submit
         setText("");
         setScanInfo(null);
 
-        // Refresh server-rendered table data
+        // Refresh server component data so "Recent redemptions" updates
         router.refresh();
         return;
       }
 
-      // Not OK (or ok:false)
-      const status = (data as any)?.status;
-      const err = (data as any)?.error || "Failed to redeem. Try again.";
-
-      if (status === "ALREADY_REDEEMED" || res.status === 409) {
-        setErrorMsg("This QR code has already been redeemed.");
-      } else if (res.status === 404) {
-        setErrorMsg("Redemption code not found. Please rescan the QR.");
-      } else {
-        setErrorMsg(err);
-      }
+      // Fallback
+      setErrorMsg("Failed to redeem. Try again.");
     } catch (e: any) {
       setErrorMsg(e?.message || "Network error redeeming QR code.");
     } finally {
       setIsSubmitting(false);
-    }
-  }
-
-  function onTextChange(v: string) {
-    setText(v);
-    setErrorMsg(null);
-    setSuccessMsg(null);
-    setScanInfo(v.trim() ? "QR code scanned. You can now redeem." : null);
-  }
-
-  async function scanWithCamera() {
-    // Minimal, safe approach: if BarcodeDetector isn't supported, tell user to paste.
-    try {
-      const anyWindow = window as any;
-      if (!("mediaDevices" in navigator) || !anyWindow.BarcodeDetector) {
-        setErrorMsg(
-          "Camera scanning is not supported on this device/browser. Please paste the scanned QR text."
-        );
-        return;
-      }
-
-      setErrorMsg(null);
-      setSuccessMsg(null);
-
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: "environment" },
-        audio: false,
-      });
-
-      const video = document.createElement("video");
-      video.setAttribute("playsinline", "true");
-      video.srcObject = stream;
-      await video.play();
-
-      const detector = new anyWindow.BarcodeDetector({
-        formats: ["qr_code"],
-      });
-
-      // Try scanning for up to ~8 seconds
-      const start = Date.now();
-      const timeoutMs = 8000;
-
-      const canvas = document.createElement("canvas");
-      const ctx = canvas.getContext("2d");
-
-      const tick = async () => {
-        if (!ctx) return;
-
-        const elapsed = Date.now() - start;
-        if (elapsed > timeoutMs) {
-          stream.getTracks().forEach((t) => t.stop());
-          setErrorMsg("Could not detect a QR code. Please try again or paste it.");
-          return;
-        }
-
-        canvas.width = video.videoWidth || 640;
-        canvas.height = video.videoHeight || 480;
-        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-
-        const bitmap = await createImageBitmap(canvas);
-        const codes = await detector.detect(bitmap);
-
-        if (codes?.length) {
-          stream.getTracks().forEach((t) => t.stop());
-          const value = codes[0]?.rawValue || "";
-          onTextChange(value);
-          return;
-        }
-
-        requestAnimationFrame(tick);
-      };
-
-      requestAnimationFrame(tick);
-    } catch (e: any) {
-      setErrorMsg(e?.message || "Camera scanning failed. Please paste the QR text.");
     }
   }
 
@@ -197,7 +150,7 @@ export default function RedeemForm() {
         <textarea
           value={text}
           onChange={(e) => onTextChange(e.target.value)}
-          placeholder="Paste scanned QR text or URL here..."
+          placeholder="Paste scanned QR text / URL / code here..."
           className="w-full rounded-xl border border-gray-200 p-3 text-xs text-gray-900 outline-none focus:ring-2 focus:ring-gray-200"
           rows={3}
         />
@@ -211,14 +164,6 @@ export default function RedeemForm() {
           className="rounded-full bg-black px-5 py-2 text-xs font-semibold text-white disabled:opacity-50"
         >
           {isSubmitting ? "Redeeming..." : "Redeem"}
-        </button>
-
-        <button
-          type="button"
-          onClick={scanWithCamera}
-          className="rounded-full border border-gray-200 px-5 py-2 text-xs font-semibold text-gray-900"
-        >
-          📷 Scan with camera
         </button>
       </div>
 
