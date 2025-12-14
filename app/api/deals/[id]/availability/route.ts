@@ -7,10 +7,10 @@ export const revalidate = 0;
 
 export async function GET(
   _req: NextRequest,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    const dealId = params.id;
+    const { id: dealId } = await params;
 
     const deal = await prisma.deal.findUnique({
       where: { id: dealId },
