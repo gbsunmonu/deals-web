@@ -15,10 +15,10 @@ enum DiscountType {
 }
 
 model Merchant {
-  id          String   @id @default(uuid())
+  id String @id @default(uuid())
 
   // Link to Supabase auth user (nullable but unique)
-  userId      String?  @unique
+  userId String? @unique
 
   name        String
   description String?
@@ -33,50 +33,55 @@ model Merchant {
   lat         Float?
   lng         Float?
 
-  deals       Deal[]
+  deals Deal[]
 }
 
-
 model Deal {
-  id            String       @id @default(uuid())
-  title         String
-  description   String
+  id          String  @id @default(uuid())
+  title       String
+  description String? // ✅ make optional (safer)
 
   originalPrice Int?
 
-  // NEW FIELD
-  shortCode     String?      @unique
+  // NEW FIELD (your existing field)
+  shortCode String? @unique
 
   discountValue Int          @default(0)
   discountType  DiscountType @default(NONE)
 
-  imageUrl      String?
+  imageUrl String?
+
+  // ✅ This is what merchant sets (null = unlimited)
   maxRedemptions Int?
 
+  startsAt DateTime
+  endsAt   DateTime
 
-  startsAt      DateTime
-  endsAt        DateTime
+  merchantId String
+  merchant   Merchant @relation(fields: [merchantId], references: [id])
 
-  merchantId    String
-  merchant      Merchant     @relation(fields: [merchantId], references: [id])
+  redemptions Redemption[]
 
-  redemptions   Redemption[]
-
-  createdAt     DateTime     @default(now())
-  updatedAt     DateTime     @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }
 
-
 model Redemption {
-  id         String   @id @default(uuid())
-  dealId     String
-  deal       Deal     @relation(fields: [dealId], references: [id])
+  id     String @id @default(uuid())
+  dealId String
+  deal   Deal   @relation(fields: [dealId], references: [id])
 
-  /// full raw QR payload (JSON string)
-  code       String   @unique
+  /// full raw QR payload (or code)
+  code String @unique
 
   /// short human-friendly code for scanning / lookup
-  shortCode  String   @unique
+  shortCode String @unique
 
-  redeemedAt DateTime @default(now())
+  // ✅ IMPORTANT: this must be nullable.
+  // Not redeemed yet => NULL
+  // Redeemed => timestamp set by confirm endpoint
+  redeemedAt DateTime?
+
+  // ✅ Helpful for “created QR codes” list + debug
+  createdAt DateTime @default(now())
 }
