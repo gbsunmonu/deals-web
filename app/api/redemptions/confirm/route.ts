@@ -3,10 +3,6 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import type { Prisma } from "@prisma/client";
 
-// Backwards compatible payloads we may receive from QR scans:
-// 1) A URL: https://your-domain.com/r/<shortCode>
-// 2) A plain short code: ABC123
-// 3) Old JSON payloads (legacy): {"type":"DEAL","dealId":"...","expiresAt":"..."}
 type LegacyDealQrPayload = {
   type: "DEAL";
   dealId: string;
@@ -29,9 +25,6 @@ async function generateUniqueRedemptionShortCode() {
   return makeShortCode(8);
 }
 
-/**
- * Retry wrapper for transaction conflicts.
- */
 async function withTxnRetry<T>(fn: () => Promise<T>, retries = 3): Promise<T> {
   let lastErr: any;
   for (let i = 0; i < retries; i++) {
@@ -39,7 +32,6 @@ async function withTxnRetry<T>(fn: () => Promise<T>, retries = 3): Promise<T> {
       return await fn();
     } catch (e: any) {
       lastErr = e;
-
       const code = e?.code;
       const msg = String(e?.message ?? "").toLowerCase();
       const shouldRetry =
@@ -49,7 +41,6 @@ async function withTxnRetry<T>(fn: () => Promise<T>, retries = 3): Promise<T> {
         msg.includes("could not serialize access");
 
       if (!shouldRetry || i === retries - 1) throw e;
-
       await new Promise((r) => setTimeout(r, 30 * (i + 1)));
     }
   }
@@ -57,7 +48,9 @@ async function withTxnRetry<T>(fn: () => Promise<T>, retries = 3): Promise<T> {
 }
 
 /**
- * Concurrency-safe: lock deal row + check capacity inside the SAME transaction.
+ * ✅ IMPORTANT FIX:
+ * Postgres: Deal.id is UUID, but Prisma parameter is text => uuid = text error.
+ * We CAST the parameter to uuid inside SQL.
  */
 async function lockDealAndEnforceCapacity(
   tx: Prisma.TransactionClient,
@@ -66,7 +59,7 @@ async function lockDealAndEnforceCapacity(
   const rows = await tx.$queryRaw<Array<{ id: string; maxRedemptions: number | null }>>`
     SELECT "id", "maxRedemptions"
     FROM "Deal"
-    WHERE "id" = ${dealId}
+    WHERE "id" = CAST(${dealId} AS uuid)
     FOR UPDATE
   `;
 
@@ -79,7 +72,7 @@ async function lockDealAndEnforceCapacity(
 
   const max = rows[0].maxRedemptions;
 
-  // Unlimited if null/undefined/<=0
+  // unlimited if null/undefined/<=0
   if (typeof max !== "number" || max <= 0) {
     return { max: max ?? null, redeemedCount: 0, soldOut: false };
   }
@@ -98,7 +91,6 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Missing request body" }, { status: 400 });
     }
 
-    // Accept JSON or plain text
     let rawText = "";
     try {
       const parsed = JSON.parse(bodyText);
@@ -120,7 +112,6 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "QR text is empty" }, { status: 400 });
     }
 
-    // If URL, extract last segment. Otherwise treat as raw short code.
     let scannedCode: string | null = null;
 
     if (/^https?:\/\//i.test(rawText)) {
@@ -138,9 +129,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "QR code is empty" }, { status: 400 });
     }
 
-    // -------------------------
-    // LEGACY JSON payload flow
-    // -------------------------
+    // LEGACY JSON payload
     if (scannedCode.startsWith("{") && scannedCode.endsWith("}")) {
       let legacy: LegacyDealQrPayload;
 
@@ -169,14 +158,8 @@ export async function POST(req: NextRequest) {
 
       return await withTxnRetry(async () => {
         const result = await prisma.$transaction(async (tx) => {
-          const { soldOut, max, redeemedCount } = await lockDealAndEnforceCapacity(
-            tx,
-            legacy.dealId
-          );
-
-          if (soldOut) {
-            return { kind: "SOLD_OUT" as const, max, redeemedCount };
-          }
+          const { soldOut } = await lockDealAndEnforceCapacity(tx, legacy.dealId);
+          if (soldOut) return { kind: "SOLD_OUT" as const };
 
           const shortCode = await generateUniqueRedemptionShortCode();
 
@@ -186,11 +169,10 @@ export async function POST(req: NextRequest) {
               code: scannedCode,
               shortCode,
               redeemedAt: new Date(),
-              // If your schema requires these:
               expiresAt: new Date(Date.now() + 5 * 60 * 1000),
               deviceHash: "legacy",
             } as any,
-            select: { id: true, redeemedAt: true, shortCode: true },
+            select: { id: true, redeemedAt: true },
           });
 
           return { kind: "REDEEMED" as const, redemption };
@@ -215,9 +197,7 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    // -------------------------
-    // NORMAL FLOW — CONCURRENCY SAFE
-    // -------------------------
+    // NORMAL FLOW (concurrency-safe)
     return await withTxnRetry(async () => {
       const now = new Date();
 
@@ -237,21 +217,16 @@ export async function POST(req: NextRequest) {
 
         if (!redemption) return { kind: "NOT_FOUND" as const };
 
-        // expiry check (if exists)
         const exp = (redemption as any).expiresAt ? new Date((redemption as any).expiresAt) : null;
-        if (exp && !Number.isNaN(exp.getTime()) && exp <= now) {
-          return { kind: "EXPIRED" as const };
-        }
+        if (exp && !Number.isNaN(exp.getTime()) && exp <= now) return { kind: "EXPIRED" as const };
 
         if (redemption.redeemedAt) {
           return { kind: "ALREADY_REDEEMED" as const, redeemedAt: redemption.redeemedAt };
         }
 
-        // lock deal + enforce capacity
         const { soldOut } = await lockDealAndEnforceCapacity(tx, redemption.dealId);
         if (soldOut) return { kind: "SOLD_OUT" as const };
 
-        // winner-takes-all update
         const where: any = { id: redemption.id, redeemedAt: null };
         if ((redemption as any).expiresAt) where.expiresAt = { gt: now };
 
@@ -279,21 +254,11 @@ export async function POST(req: NextRequest) {
           select: { id: true, redeemedAt: true },
         });
 
-        const deal = redemption.deal;
-        const original = deal.originalPrice ?? 0;
-        const discount = deal.discountValue ?? 0;
-        const hasDiscount = discount > 0 && original > 0;
-        const discountedPrice = hasDiscount
-          ? Math.round(original - (original * discount) / 100)
-          : original || null;
-        const savingsAmount = hasDiscount && discountedPrice != null ? original - discountedPrice : null;
-
         return {
           kind: "REDEEMED" as const,
-          deal,
-          merchant: deal.merchant,
+          deal: redemption.deal,
+          merchant: redemption.deal.merchant,
           redemption: { id: redeemedRow!.id, redeemedAt: redeemedRow!.redeemedAt! },
-          computed: { discountedPrice, savingsAmount },
         };
       });
 
@@ -330,24 +295,12 @@ export async function POST(req: NextRequest) {
         );
       }
 
-      // REDEEMED
       return NextResponse.json(
         {
           ok: true,
           status: "REDEEMED",
           message: "Redemption successful.",
-          deal: {
-            id: out.deal.id,
-            title: out.deal.title,
-            originalPrice: out.deal.originalPrice,
-            discountValue: out.deal.discountValue,
-            discountType: out.deal.discountType,
-            discountedPrice: out.computed.discountedPrice,
-            savingsAmount: out.computed.savingsAmount,
-            startsAt: out.deal.startsAt,
-            endsAt: out.deal.endsAt,
-            maxRedemptions: (out.deal as any).maxRedemptions ?? null,
-          },
+          deal: { id: out.deal.id, title: out.deal.title },
           merchant: out.merchant,
           redemption: out.redemption,
         },
