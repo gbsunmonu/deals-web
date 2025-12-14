@@ -3,11 +3,19 @@
 import { useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 
-type AnyObj = Record<string, any>;
+type ApiResp = {
+  ok?: boolean;
+  status?: string;
+  message?: string;
+  error?: string;
+  redeemedAt?: string | Date | null;
+  redemption?: { id?: string; redeemedAt?: string | Date | null } | null;
+  deal?: { title?: string } | null;
+};
 
-function prettifyTime(iso?: string) {
-  if (!iso) return "";
-  const d = new Date(iso);
+function formatDateTime(value?: string | Date | null) {
+  if (!value) return "";
+  const d = value instanceof Date ? value : new Date(value);
   if (Number.isNaN(d.getTime())) return "";
   return d.toLocaleString("en-GB", {
     day: "2-digit",
@@ -21,118 +29,94 @@ function prettifyTime(iso?: string) {
 export default function RedeemForm() {
   const router = useRouter();
 
-  const [text, setText] = useState("");
-  const [scanInfo, setScanInfo] = useState<string | null>(null);
-  const [successMsg, setSuccessMsg] = useState<string | null>(null);
-  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [qrText, setQrText] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  const canRedeem = useMemo(() => text.trim().length > 0 && !isSubmitting, [
-    text,
+  const [success, setSuccess] = useState<string | null>(null);
+  const [info, setInfo] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const canSubmit = useMemo(() => qrText.trim().length > 0 && !isSubmitting, [
+    qrText,
     isSubmitting,
   ]);
 
   function resetMessages() {
-    setErrorMsg(null);
-    setSuccessMsg(null);
+    setSuccess(null);
+    setInfo(null);
+    setError(null);
   }
 
-  function onTextChange(v: string) {
-    setText(v);
-    resetMessages();
-    setScanInfo(v.trim() ? "QR code scanned. You can now redeem." : null);
-  }
-
-  async function redeemNow() {
+  async function onRedeem() {
     resetMessages();
 
-    const payload = text.trim();
-    if (!payload) {
-      setErrorMsg("Paste a QR code value first.");
+    const text = qrText.trim();
+    if (!text) {
+      setError("Paste the scanned QR text first.");
       return;
     }
 
     setIsSubmitting(true);
+
     try {
       const res = await fetch("/api/redemptions/confirm", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        // We always send the raw scanned text. Your API supports URL / code / JSON.
-        body: JSON.stringify({ qrText: payload }),
+        body: JSON.stringify({ qrText: text }),
       });
 
-      let data: AnyObj = {};
+      let data: ApiResp = {};
       try {
-        data = await res.json();
+        data = (await res.json()) as ApiResp;
       } catch {
         data = {};
       }
 
-      // --- Normalize common response shapes --------------------------
       const status = String(data?.status ?? "").toUpperCase();
-      const okFlag = data?.ok === true;
-      const hasError = typeof data?.error === "string" && data.error.trim() !== "";
 
-      // Some APIs return { message }, some return { error }, some return only status.
-      const message = (data?.message as string | undefined) ?? undefined;
-      const error = (data?.error as string | undefined) ?? undefined;
-
-      // Already redeemed cases (can be 409, or status flag)
-      if (res.status === 409 || status === "ALREADY_REDEEMED") {
-        setErrorMsg("This QR code has already been redeemed.");
+      // ---- SOLD OUT
+      if (status === "SOLD_OUT" || res.status === 409 && (data?.error || "").toLowerCase().includes("fully")) {
+        setError("❌ Deal is sold out (redemption limit reached).");
         return;
       }
 
-      // Not found
-      if (res.status === 404) {
-        setErrorMsg("Redemption code not found. Please rescan the QR.");
+      // ---- ALREADY REDEEMED
+      if (status === "ALREADY_REDEEMED" || res.status === 409) {
+        const when = formatDateTime(data?.redeemedAt ?? data?.redemption?.redeemedAt ?? null);
+        setError(when ? `⚠️ Already redeemed (${when}).` : "⚠️ This QR code has already been redeemed.");
         return;
       }
 
-      // If server responded with an error string
-      if (!res.ok || hasError) {
-        setErrorMsg(error || "Failed to redeem. Try again.");
+      // ---- EXPIRED / NOT STARTED
+      if (status === "EXPIRED" || res.status === 400 && (data?.error || "").toLowerCase().includes("expired")) {
+        setError("❌ This deal has expired.");
+        return;
+      }
+      if (status === "NOT_STARTED") {
+        setError("⚠️ This deal has not started yet.");
         return;
       }
 
-      // ✅ SUCCESS detection (more permissive):
-      // - any 2xx response is success
-      // - OR explicit ok:true
-      // - OR status === REDEEMED
-      const isSuccess = res.ok || okFlag || status === "REDEEMED";
-
-      if (isSuccess) {
-        const dealTitle =
-          data?.deal?.title ||
-          data?.dealTitle ||
-          data?.deal?.name ||
-          undefined;
-
-        const redeemedAt =
-          data?.redemption?.redeemedAt ||
-          data?.redeemedAt ||
-          undefined;
-
-        const when = prettifyTime(redeemedAt);
-        const base =
-          message ||
-          (dealTitle ? `✅ Redeemed successfully: ${dealTitle}` : "✅ Redeemed successfully");
-
-        setSuccessMsg(when ? `${base} • ${when}` : base);
-
-        // Clear input to prevent accidental re-submit
-        setText("");
-        setScanInfo(null);
-
-        // Refresh server component data so "Recent redemptions" updates
-        router.refresh();
+      // ---- Other errors
+      if (!res.ok || data?.ok === false) {
+        setError(data?.error || "Failed to redeem. Please try again.");
         return;
       }
 
-      // Fallback
-      setErrorMsg("Failed to redeem. Try again.");
+      // ---- SUCCESS
+      const dealTitle = data?.deal?.title ? ` — ${data.deal.title}` : "";
+      const when = formatDateTime(data?.redemption?.redeemedAt ?? null);
+
+      setSuccess(when ? `✅ Redemption successful${dealTitle} • ${when}` : `✅ Redemption successful${dealTitle}`);
+
+      // Clear input so merchant doesn't accidentally resubmit same QR
+      setQrText("");
+
+      // Refresh server data (recent redemptions table)
+      router.refresh();
     } catch (e: any) {
-      setErrorMsg(e?.message || "Network error redeeming QR code.");
+      console.error(e);
+      setError(e?.message || "Network error redeeming QR code.");
     } finally {
       setIsSubmitting(false);
     }
@@ -140,48 +124,64 @@ export default function RedeemForm() {
 
   return (
     <div className="rounded-2xl border border-gray-200 bg-white p-4 shadow-sm">
-      <h2 className="text-sm font-semibold text-gray-900">Redeem a QR code</h2>
+      <h2 className="text-sm font-semibold text-gray-900">Redeem customer QR</h2>
       <p className="mt-1 text-xs text-gray-500">
-        Scan the customer&apos;s QR code, or paste the scanned text here. Then
-        click <span className="font-semibold">Redeem</span>.
+        Paste the scanned QR text / link / short code and redeem it. After success, the input clears to prevent double-redemption.
       </p>
 
       <div className="mt-3">
         <textarea
-          value={text}
-          onChange={(e) => onTextChange(e.target.value)}
-          placeholder="Paste scanned QR text / URL / code here..."
-          className="w-full rounded-xl border border-gray-200 p-3 text-xs text-gray-900 outline-none focus:ring-2 focus:ring-gray-200"
+          value={qrText}
+          onChange={(e) => {
+            setQrText(e.target.value);
+            // Don’t clear success instantly while they read it; clear only error/info on edit.
+            setError(null);
+            setInfo(null);
+          }}
           rows={3}
+          placeholder="Paste scanned QR text / URL / short code here..."
+          className="w-full rounded-xl border border-gray-200 p-3 text-xs text-gray-900 outline-none focus:ring-2 focus:ring-gray-200"
         />
       </div>
 
-      <div className="mt-3 flex flex-wrap items-center gap-3">
+      <div className="mt-3 flex flex-wrap items-center gap-2">
         <button
           type="button"
-          onClick={redeemNow}
-          disabled={!canRedeem}
+          onClick={onRedeem}
+          disabled={!canSubmit}
           className="rounded-full bg-black px-5 py-2 text-xs font-semibold text-white disabled:opacity-50"
         >
           {isSubmitting ? "Redeeming..." : "Redeem"}
         </button>
+
+        <button
+          type="button"
+          onClick={() => {
+            setQrText("");
+            resetMessages();
+            setInfo("Cleared.");
+          }}
+          className="rounded-full border border-gray-200 bg-white px-5 py-2 text-xs font-semibold text-gray-900 hover:bg-gray-50"
+        >
+          Clear
+        </button>
       </div>
 
-      {scanInfo && (
-        <div className="mt-3 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-xs text-emerald-800">
-          {scanInfo}
-        </div>
-      )}
-
-      {successMsg && (
+      {success && (
         <div className="mt-3 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-xs text-emerald-900">
-          {successMsg}
+          {success}
         </div>
       )}
 
-      {errorMsg && (
+      {info && !success && !error && (
+        <div className="mt-3 rounded-xl border border-gray-200 bg-gray-50 px-4 py-3 text-xs text-gray-700">
+          {info}
+        </div>
+      )}
+
+      {error && (
         <div className="mt-3 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-xs text-red-700">
-          {errorMsg}
+          {error}
         </div>
       )}
     </div>
