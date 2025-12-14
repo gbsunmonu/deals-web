@@ -2,6 +2,7 @@
 // Creates a NEW customer redemption code (short code) for a deal,
 // but enforces: 1 active QR per (device + deal) at a time.
 // QR expires after 15 minutes.
+// ✅ NEW: blocks generation if deal is sold out (maxRedemptions reached).
 
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
@@ -9,6 +10,8 @@ import { getOrSetAnonDeviceId, hashDeviceId } from "@/lib/anonDevice";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
+
+const QR_TTL_MINUTES = 15;
 
 function makeShortCode(len = 6) {
   return Math.random().toString(36).substring(2, 2 + len).toUpperCase();
@@ -26,8 +29,30 @@ async function generateUniqueShortCode() {
   return makeShortCode(8);
 }
 
+async function getAvailability(dealId: string) {
+  const deal = await prisma.deal.findUnique({
+    where: { id: dealId },
+    select: { id: true, maxRedemptions: true },
+  });
+
+  if (!deal) return { exists: false as const };
+
+  const redeemedCount = await prisma.redemption.count({
+    where: { dealId, redeemedAt: { not: null } },
+  });
+
+  const max = deal.maxRedemptions;
+  const limited = typeof max === "number" && max > 0;
+
+  const left = limited ? Math.max(max - redeemedCount, 0) : null;
+  const soldOut = limited ? redeemedCount >= max : false;
+
+  return { exists: true as const, max, redeemedCount, left, soldOut };
+}
+
 export async function POST(req: NextRequest) {
-  const res = NextResponse.next(); // we’ll convert this to JSON later but keep cookies settable
+  // we need a response object to set cookies
+  const cookieRes = NextResponse.next();
 
   try {
     const body = await req.json().catch(() => ({}));
@@ -37,24 +62,33 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "dealId is required" }, { status: 400 });
     }
 
-    // Ensure deal exists
-    const deal = await prisma.deal.findUnique({
-      where: { id: dealId },
-      select: { id: true },
-    });
-
-    if (!deal) {
+    // ✅ Sold out check (prevents QR generation spam)
+    const avail = await getAvailability(dealId);
+    if (!avail.exists) {
       return NextResponse.json({ error: "Deal not found" }, { status: 404 });
+    }
+    if (avail.soldOut) {
+      return NextResponse.json(
+        {
+          ok: false,
+          status: "SOLD_OUT",
+          error: "This deal is sold out.",
+          left: 0,
+          maxRedemptions: avail.max ?? null,
+          redeemedCount: avail.redeemedCount,
+        },
+        { status: 409 }
+      );
     }
 
     // ✅ device lock (no customer account required)
-    const deviceId = getOrSetAnonDeviceId(req, res);
+    const deviceId = getOrSetAnonDeviceId(req, cookieRes);
     const deviceHash = hashDeviceId(deviceId);
     const activeKey = `${dealId}:${deviceHash}`;
 
     const now = new Date();
 
-    // ✅ If this device already has an active unredeemed, unexpired QR for this deal, reuse it
+    // Reuse an active unredeemed, unexpired QR for this deal+device
     const existing = await prisma.redemption.findFirst({
       where: {
         activeKey,
@@ -72,14 +106,12 @@ export async function POST(req: NextRequest) {
 
     if (existing) {
       const out = NextResponse.json(existing, { status: 200 });
-      // carry cookie from `res` to `out`
-      out.cookies.set(res.cookies.getAll()[0] ?? []);
-      res.cookies.getAll().forEach((c) => out.cookies.set(c));
+      cookieRes.cookies.getAll().forEach((c) => out.cookies.set(c));
       return out;
     }
 
     // Create a new QR redemption (NOT redeemed yet) - 15 minute expiry
-    const expiresAt = new Date(Date.now() + 15 * 60 * 1000);
+    const expiresAt = new Date(Date.now() + QR_TTL_MINUTES * 60 * 1000);
 
     for (let i = 0; i < 6; i++) {
       const shortCode = await generateUniqueShortCode();
@@ -93,7 +125,7 @@ export async function POST(req: NextRequest) {
             redeemedAt: null,
             expiresAt,
             deviceHash,
-            activeKey, // unique per device+deal
+            activeKey,
           },
           select: {
             id: true,
@@ -105,10 +137,9 @@ export async function POST(req: NextRequest) {
         });
 
         const out = NextResponse.json(created, { status: 201 });
-        res.cookies.getAll().forEach((c) => out.cookies.set(c));
+        cookieRes.cookies.getAll().forEach((c) => out.cookies.set(c));
         return out;
       } catch (err: any) {
-        // Unique constraint collision -> retry
         if (err?.code === "P2002") continue;
         throw err;
       }

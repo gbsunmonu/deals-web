@@ -3,25 +3,25 @@ import Link from "next/link";
 import prisma from "@/lib/prisma";
 import DealCard from "@/components/DealCard";
 
-type ExploreSearchParams = Record<string, string | string[] | undefined>;
-
 type ExplorePageProps = {
-  // Next 16 / Turbopack may pass this as a Promise in some cases.
-  searchParams?: ExploreSearchParams | Promise<ExploreSearchParams>;
+  searchParams?: {
+    q?: string;
+    category?: string;
+  };
 };
 
 export const dynamic = "force-dynamic";
 
-function firstString(v: string | string[] | undefined) {
-  if (Array.isArray(v)) return v[0] ?? "";
-  return v ?? "";
+function computeLeftAndSoldOut(max: number | null, redeemedCount: number) {
+  const limited = typeof max === "number" && max > 0;
+  const left = limited ? Math.max(max - redeemedCount, 0) : null;
+  const soldOut = limited ? redeemedCount >= max : false;
+  return { left, soldOut };
 }
 
 export default async function ExplorePage({ searchParams }: ExplorePageProps) {
-  const sp = (await Promise.resolve(searchParams)) ?? {};
-
-  const q = firstString(sp.q).trim();
-  const category = firstString(sp.category).trim();
+  const q = (searchParams?.q ?? "").trim();
+  const category = (searchParams?.category ?? "").trim();
 
   const now = new Date();
 
@@ -66,30 +66,27 @@ export default async function ExplorePage({ searchParams }: ExplorePageProps) {
     where: {
       startsAt: { lte: now },
       endsAt: { gte: now },
-      // text search
       ...(q
         ? {
             OR: [
               { title: { contains: q, mode: "insensitive" } },
               { description: { contains: q, mode: "insensitive" } },
-              {
-                merchant: {
-                  name: { contains: q, mode: "insensitive" },
-                },
-              },
+              { merchant: { name: { contains: q, mode: "insensitive" } } },
             ],
           }
         : {}),
-      // category filter
-      ...(category
-        ? {
-            merchant: {
-              category,
-            },
-          }
-        : {}),
+      ...(category ? { merchant: { category } } : {}),
     },
-    include: {
+    select: {
+      id: true,
+      title: true,
+      originalPrice: true,
+      discountValue: true,
+      discountType: true,
+      startsAt: true,
+      endsAt: true,
+      imageUrl: true,
+      maxRedemptions: true,
       merchant: {
         select: {
           id: true,
@@ -103,12 +100,27 @@ export default async function ExplorePage({ searchParams }: ExplorePageProps) {
     },
   });
 
+  // --- REDEEMED COUNTS PER DEAL (only redeemedAt NOT NULL) --------
+  const dealIds = deals.map((d) => d.id);
+  const redeemedCounts = dealIds.length
+    ? await prisma.redemption.groupBy({
+        by: ["dealId"],
+        where: {
+          dealId: { in: dealIds },
+          redeemedAt: { not: null },
+        },
+        _count: { _all: true },
+      })
+    : [];
+
+  const countMap = new Map<string, number>();
+  redeemedCounts.forEach((row) => countMap.set(row.dealId, row._count._all));
+
   return (
     <main className="mx-auto max-w-6xl px-4 py-8">
-      {/* HERO BANNER – colour + layout like your reference, but tighter */}
+      {/* HERO BANNER */}
       <section className="mb-6 rounded-3xl bg-gradient-to-r from-fuchsia-600 via-violet-500 to-emerald-500 p-5 md:p-6 text-white shadow-[0_18px_40px_rgba(60,0,120,0.30)]">
         <div className="grid gap-4 md:grid-cols-[minmax(0,1.7fr)_minmax(0,1fr)] md:items-center">
-          {/* LEFT SIDE */}
           <div className="space-y-2 md:space-y-3">
             <p className="text-[11px] font-semibold uppercase tracking-[0.25em] opacity-80">
               Dealina
@@ -125,12 +137,10 @@ export default async function ExplorePage({ searchParams }: ExplorePageProps) {
             </p>
 
             <p className="pt-1 text-[10px] font-semibold uppercase tracking-wide text-white/80">
-              1. Pick a deal • 2. Save the QR code • 3. Show it in store to get
-              your discount
+              1. Pick a deal • 2. Get a QR code • 3. Show it in store to redeem
             </p>
           </div>
 
-          {/* RIGHT SIDE – METRIC CARDS */}
           <div className="grid gap-3 md:grid-cols-3">
             <div className="rounded-2xl bg-white/10 p-3 shadow-sm backdrop-blur-sm">
               <p className="text-[10px] font-semibold uppercase tracking-wide text-white/80">
@@ -236,30 +246,41 @@ export default async function ExplorePage({ searchParams }: ExplorePageProps) {
       <section aria-label="Live deals">
         {deals.length === 0 ? (
           <div className="rounded-2xl border border-dashed border-slate-200 bg-slate-50 px-4 py-10 text-center text-sm text-slate-500">
-            No deals match your search yet. Try clearing filters or checking
-            back later.
+            No deals match your search yet. Try clearing filters or checking back later.
           </div>
         ) : (
           <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-            {deals.map((deal) => (
-              <DealCard
-                key={deal.id}
-                deal={{
-                  id: deal.id,
-                  title: deal.title,
-                  originalPrice: deal.originalPrice,
-                  discountValue: deal.discountValue,
-                  startsAt: deal.startsAt.toISOString(),
-                  endsAt: deal.endsAt.toISOString(),
-                  imageUrl: deal.imageUrl,
-                }}
-                merchant={{
-                  id: deal.merchant.id,
-                  name: deal.merchant.name,
-                  city: deal.merchant.city,
-                }}
-              />
-            ))}
+            {deals.map((deal) => {
+              const redeemedCount = countMap.get(deal.id) ?? 0;
+              const { left, soldOut } = computeLeftAndSoldOut(
+                deal.maxRedemptions ?? null,
+                redeemedCount
+              );
+
+              return (
+                <DealCard
+                  key={deal.id}
+                  deal={{
+                    id: deal.id,
+                    title: deal.title,
+                    originalPrice: deal.originalPrice,
+                    discountValue: deal.discountValue,
+                    startsAt: deal.startsAt.toISOString(),
+                    endsAt: deal.endsAt.toISOString(),
+                    imageUrl: deal.imageUrl,
+                    maxRedemptions: deal.maxRedemptions ?? null,
+                    redeemedCount,
+                    left,
+                    soldOut,
+                  }}
+                  merchant={{
+                    id: deal.merchant.id,
+                    name: deal.merchant.name,
+                    city: deal.merchant.city,
+                  }}
+                />
+              );
+            })}
           </div>
         )}
       </section>
