@@ -11,19 +11,18 @@ type CreateDealPayload = {
   startsAt: string; // "YYYY-MM-DD"
   endsAt: string; // "YYYY-MM-DD"
   imageUrl?: string | null;
+  maxRedemptions?: number | null; // ✅ NEW
 };
 
 // Copy cookies set by Supabase into the response we actually return
 function attachSupabaseCookies(from: NextResponse, to: NextResponse) {
   for (const c of from.cookies.getAll()) {
-    // c has { name, value, ... } — NextResponse can accept it directly
     to.cookies.set(c as any);
   }
   return to;
 }
 
 export async function POST(req: NextRequest) {
-  // IMPORTANT: create supabase client + "res" first
   const { supabase, res } = createSupabaseRouteClient(req);
 
   try {
@@ -50,10 +49,7 @@ export async function POST(req: NextRequest) {
 
     if (!merchant) {
       const out = NextResponse.json(
-        {
-          error:
-            "Merchant profile not found. Please complete your profile first.",
-        },
+        { error: "Merchant profile not found. Please complete your profile first." },
         { status: 400 }
       );
       return attachSupabaseCookies(res, out);
@@ -83,6 +79,22 @@ export async function POST(req: NextRequest) {
       if (!Number.isNaN(n) && n >= 0 && n <= 100) discountValue = n;
     }
 
+    // ✅ NEW: maxRedemptions (optional)
+    // null/undefined/<=0 => unlimited (store null)
+    let maxRedemptions: number | null = null;
+    if (body.maxRedemptions !== undefined && body.maxRedemptions !== null) {
+      const n = Number(body.maxRedemptions);
+      if (Number.isFinite(n) && Number.isInteger(n) && n > 0) {
+        maxRedemptions = n;
+      } else if (String(body.maxRedemptions).trim() !== "") {
+        const out = NextResponse.json(
+          { error: "Max redemptions must be a whole number greater than 0 (or leave empty)." },
+          { status: 400 }
+        );
+        return attachSupabaseCookies(res, out);
+      }
+    }
+
     // 5) Dates
     if (!body.startsAt || !body.endsAt) {
       const out = NextResponse.json(
@@ -92,15 +104,11 @@ export async function POST(req: NextRequest) {
       return attachSupabaseCookies(res, out);
     }
 
-    // Make start date begin-of-day UTC-ish, end date end-of-day (prevents “ends too early”)
     const startsAt = new Date(`${body.startsAt}T00:00:00.000Z`);
     const endsAt = new Date(`${body.endsAt}T23:59:59.999Z`);
 
     if (Number.isNaN(startsAt.getTime()) || Number.isNaN(endsAt.getTime())) {
-      const out = NextResponse.json(
-        { error: "Invalid start or end date." },
-        { status: 400 }
-      );
+      const out = NextResponse.json({ error: "Invalid start or end date." }, { status: 400 });
       return attachSupabaseCookies(res, out);
     }
 
@@ -117,6 +125,7 @@ export async function POST(req: NextRequest) {
         discountValue,
         ...(originalPrice != null ? { originalPrice } : {}),
         ...(imageUrl ? { imageUrl } : {}),
+        ...(maxRedemptions != null ? { maxRedemptions } : {}), // ✅ NEW
         merchant: { connect: { id: merchant.id } },
       },
     });
