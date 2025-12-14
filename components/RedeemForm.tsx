@@ -1,187 +1,273 @@
 "use client";
 
-import { useMemo, useState } from "react";
-import { useRouter } from "next/navigation";
+import { useEffect, useRef, useState, useTransition } from "react";
+import { BrowserQRCodeReader, IScannerControls } from "@zxing/browser";
 
-type ApiResp = {
-  ok?: boolean;
-  status?: string;
-  message?: string;
-  error?: string;
-  redeemedAt?: string | Date | null;
-  redemption?: { id?: string; redeemedAt?: string | Date | null } | null;
-  deal?: { title?: string } | null;
-};
-
-function formatDateTime(value?: string | Date | null) {
-  if (!value) return "";
-  const d = value instanceof Date ? value : new Date(value);
-  if (Number.isNaN(d.getTime())) return "";
-  return d.toLocaleString("en-GB", {
-    day: "2-digit",
-    month: "short",
-    year: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-}
+type RedeemResponse =
+  | {
+      ok: true;
+      status: "REDEEMED";
+      message?: string;
+      redemption?: { id: string; redeemedAt: string };
+      deal?: { title?: string };
+      merchant?: { name?: string };
+    }
+  | {
+      ok?: false;
+      status?: "ALREADY_REDEEMED" | "SOLD_OUT";
+      error?: string;
+      redeemedAt?: string;
+      details?: string;
+    }
+  | { error?: string; details?: string };
 
 export default function RedeemForm() {
-  const router = useRouter();
-
   const [qrText, setQrText] = useState("");
-  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [status, setStatus] = useState<
+    | { type: "idle" }
+    | { type: "success"; message: string }
+    | { type: "error"; message: string }
+  >({ type: "idle" });
 
-  const [success, setSuccess] = useState<string | null>(null);
-  const [info, setInfo] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [isPending, startTransition] = useTransition();
 
-  const canSubmit = useMemo(() => qrText.trim().length > 0 && !isSubmitting, [
-    qrText,
-    isSubmitting,
-  ]);
+  // Camera scanning
+  const [isScanning, setIsScanning] = useState(false);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const controlsRef = useRef<IScannerControls | null>(null);
 
-  function resetMessages() {
-    setSuccess(null);
-    setInfo(null);
-    setError(null);
+  async function stopScanner() {
+    try {
+      controlsRef.current?.stop();
+    } catch {}
+    controlsRef.current = null;
+
+    // Extra safety: stop any active stream tracks
+    const video = videoRef.current;
+    const stream = video?.srcObject as MediaStream | null;
+    if (stream) {
+      stream.getTracks().forEach((t) => t.stop());
+      if (video) video.srcObject = null;
+    }
   }
 
-  async function onRedeem() {
-    resetMessages();
+  useEffect(() => {
+    // Cleanup on unmount
+    return () => {
+      stopScanner();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
-    const text = qrText.trim();
-    if (!text) {
-      setError("Paste the scanned QR text first.");
+  function clearAll() {
+    setQrText("");
+    setStatus({ type: "idle" });
+  }
+
+  function redeem(textOverride?: string) {
+    const payload = (textOverride ?? qrText).trim();
+    if (!payload) {
+      setStatus({ type: "error", message: "Paste or scan a QR code first." });
       return;
     }
 
-    setIsSubmitting(true);
+    setStatus({ type: "idle" });
+
+    startTransition(async () => {
+      try {
+        const res = await fetch("/api/redemptions/confirm", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ qrText: payload }),
+        });
+
+        const data = (await res.json().catch(() => ({}))) as RedeemResponse;
+
+        if (!res.ok) {
+          const msg =
+            (data as any)?.error ||
+            (data as any)?.details ||
+            "Failed to redeem.";
+          setStatus({ type: "error", message: msg });
+
+          // On failure, do NOT clear input (so user can retry/copy)
+          return;
+        }
+
+        // Success
+        const successMsg =
+          (data as any)?.message ||
+          `Redeemed successfully${(data as any)?.deal?.title ? `: ${(data as any).deal.title}` : ""}.`;
+
+        setStatus({ type: "success", message: successMsg });
+
+        // ✅ prevent double-redeem confusion
+        setQrText("");
+      } catch (err: any) {
+        setStatus({
+          type: "error",
+          message: err?.message || "Something went wrong redeeming the QR.",
+        });
+      }
+    });
+  }
+
+  async function startCameraScan() {
+    setStatus({ type: "idle" });
+
+    // Basic browser support
+    if (!navigator?.mediaDevices?.getUserMedia) {
+      setStatus({
+        type: "error",
+        message: "Camera not supported in this browser.",
+      });
+      return;
+    }
+
+    setIsScanning(true);
 
     try {
-      const res = await fetch("/api/redemptions/confirm", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ qrText: text }),
+      const reader = new BrowserQRCodeReader();
+
+      // Prefer back camera when available (mobile)
+      const devices = await BrowserQRCodeReader.listVideoInputDevices();
+      const preferred =
+        devices.find((d) => /back|rear|environment/i.test(d.label))?.deviceId ||
+        devices[0]?.deviceId;
+
+      if (!videoRef.current) {
+        setStatus({ type: "error", message: "Camera UI not ready." });
+        setIsScanning(false);
+        return;
+      }
+
+      // Start decoding
+      controlsRef.current = await reader.decodeFromVideoDevice(
+        preferred || undefined,
+        videoRef.current,
+        (result, error, controls) => {
+          if (result) {
+            const text = result.getText();
+            setQrText(text);
+            setIsScanning(false);
+
+            // Stop camera immediately once we get a result
+            try {
+              controls.stop();
+            } catch {}
+            stopScanner();
+
+            // Auto-redeem after scan (you can change this behavior if you want)
+            redeem(text);
+          }
+        }
+      );
+    } catch (err: any) {
+      await stopScanner();
+      setIsScanning(false);
+      setStatus({
+        type: "error",
+        message:
+          err?.message ||
+          "Could not open camera. Check permissions and try again.",
       });
-
-      let data: ApiResp = {};
-      try {
-        data = (await res.json()) as ApiResp;
-      } catch {
-        data = {};
-      }
-
-      const status = String(data?.status ?? "").toUpperCase();
-
-      // ---- SOLD OUT
-      if (status === "SOLD_OUT" || res.status === 409 && (data?.error || "").toLowerCase().includes("fully")) {
-        setError("❌ Deal is sold out (redemption limit reached).");
-        return;
-      }
-
-      // ---- ALREADY REDEEMED
-      if (status === "ALREADY_REDEEMED" || res.status === 409) {
-        const when = formatDateTime(data?.redeemedAt ?? data?.redemption?.redeemedAt ?? null);
-        setError(when ? `⚠️ Already redeemed (${when}).` : "⚠️ This QR code has already been redeemed.");
-        return;
-      }
-
-      // ---- EXPIRED / NOT STARTED
-      if (status === "EXPIRED" || res.status === 400 && (data?.error || "").toLowerCase().includes("expired")) {
-        setError("❌ This deal has expired.");
-        return;
-      }
-      if (status === "NOT_STARTED") {
-        setError("⚠️ This deal has not started yet.");
-        return;
-      }
-
-      // ---- Other errors
-      if (!res.ok || data?.ok === false) {
-        setError(data?.error || "Failed to redeem. Please try again.");
-        return;
-      }
-
-      // ---- SUCCESS
-      const dealTitle = data?.deal?.title ? ` — ${data.deal.title}` : "";
-      const when = formatDateTime(data?.redemption?.redeemedAt ?? null);
-
-      setSuccess(when ? `✅ Redemption successful${dealTitle} • ${when}` : `✅ Redemption successful${dealTitle}`);
-
-      // Clear input so merchant doesn't accidentally resubmit same QR
-      setQrText("");
-
-      // Refresh server data (recent redemptions table)
-      router.refresh();
-    } catch (e: any) {
-      console.error(e);
-      setError(e?.message || "Network error redeeming QR code.");
-    } finally {
-      setIsSubmitting(false);
     }
   }
 
+  async function cancelScan() {
+    await stopScanner();
+    setIsScanning(false);
+  }
+
   return (
-    <div className="rounded-2xl border border-gray-200 bg-white p-4 shadow-sm">
+    <div className="rounded-2xl border border-gray-200 bg-white px-4 py-4 shadow-sm">
       <h2 className="text-sm font-semibold text-gray-900">Redeem customer QR</h2>
       <p className="mt-1 text-xs text-gray-500">
-        Paste the scanned QR text / link / short code and redeem it. After success, the input clears to prevent double-redemption.
+        Paste the scanned QR text / link / short code and redeem it. After
+        success, the input clears to prevent double-redemption.
       </p>
 
       <div className="mt-3">
         <textarea
           value={qrText}
-          onChange={(e) => {
-            setQrText(e.target.value);
-            // Don’t clear success instantly while they read it; clear only error/info on edit.
-            setError(null);
-            setInfo(null);
-          }}
-          rows={3}
+          onChange={(e) => setQrText(e.target.value)}
           placeholder="Paste scanned QR text / URL / short code here..."
-          className="w-full rounded-xl border border-gray-200 p-3 text-xs text-gray-900 outline-none focus:ring-2 focus:ring-gray-200"
+          className="w-full rounded-xl border border-gray-200 px-3 py-2 text-sm text-gray-900 placeholder:text-gray-400 focus:border-emerald-500 focus:outline-none focus:ring-1 focus:ring-emerald-500"
+          rows={4}
         />
       </div>
 
-      <div className="mt-3 flex flex-wrap items-center gap-2">
+      <div className="mt-3 flex flex-wrap gap-2">
         <button
           type="button"
-          onClick={onRedeem}
-          disabled={!canSubmit}
-          className="rounded-full bg-black px-5 py-2 text-xs font-semibold text-white disabled:opacity-50"
+          onClick={() => redeem()}
+          disabled={isPending || isScanning}
+          className="inline-flex items-center rounded-full bg-black px-4 py-2 text-xs font-semibold text-white hover:bg-gray-900 disabled:opacity-60"
         >
-          {isSubmitting ? "Redeeming..." : "Redeem"}
+          {isPending ? "Redeeming..." : "Redeem"}
         </button>
 
         <button
           type="button"
-          onClick={() => {
-            setQrText("");
-            resetMessages();
-            setInfo("Cleared.");
-          }}
-          className="rounded-full border border-gray-200 bg-white px-5 py-2 text-xs font-semibold text-gray-900 hover:bg-gray-50"
+          onClick={clearAll}
+          disabled={isPending || isScanning}
+          className="inline-flex items-center rounded-full border border-gray-200 px-4 py-2 text-xs font-semibold text-gray-700 hover:bg-gray-50 disabled:opacity-60"
         >
           Clear
         </button>
+
+        <button
+          type="button"
+          onClick={startCameraScan}
+          disabled={isPending || isScanning}
+          className="inline-flex items-center rounded-full border border-gray-200 px-4 py-2 text-xs font-semibold text-gray-700 hover:bg-gray-50 disabled:opacity-60"
+        >
+          Scan with camera
+        </button>
       </div>
 
-      {success && (
-        <div className="mt-3 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-xs text-emerald-900">
-          {success}
+      {/* Status */}
+      {status.type === "success" && (
+        <div className="mt-3 rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-800">
+          ✅ {status.message}
         </div>
       )}
 
-      {info && !success && !error && (
-        <div className="mt-3 rounded-xl border border-gray-200 bg-gray-50 px-4 py-3 text-xs text-gray-700">
-          {info}
+      {status.type === "error" && (
+        <div className="mt-3 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-800">
+          {status.message}
         </div>
       )}
 
-      {error && (
-        <div className="mt-3 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-xs text-red-700">
-          {error}
+      {/* Camera modal */}
+      {isScanning && (
+        <div className="mt-4 rounded-2xl border border-gray-200 bg-gray-50 p-3">
+          <div className="flex items-center justify-between gap-2">
+            <p className="text-xs font-semibold text-gray-700">
+              Scanning… point the camera at the QR code
+            </p>
+            <button
+              type="button"
+              onClick={cancelScan}
+              className="rounded-full border border-gray-200 bg-white px-3 py-1 text-xs font-semibold text-gray-700 hover:bg-gray-50"
+            >
+              Cancel
+            </button>
+          </div>
+
+          <div className="mt-3 overflow-hidden rounded-xl border border-gray-200 bg-black">
+            <video
+              ref={videoRef}
+              className="h-72 w-full object-cover"
+              muted
+              playsInline
+              autoPlay
+            />
+          </div>
+
+          <p className="mt-2 text-[11px] text-gray-500">
+            If the camera doesn’t open, allow camera permission for this site.
+          </p>
         </div>
       )}
     </div>
