@@ -22,29 +22,30 @@ function lastNDaysLabels(days = 14): string[] {
  * Redemptions timeseries for the last N days, plus pct change vs prior window.
  * Uses Redemption.redeemedAt and Deal.merchantId.
  */
-export async function redemptionSeriesWithTrend(
-  merchantId: string,
-  days = 14
-) {
+export async function redemptionSeriesWithTrend(merchantId: string, days = 14) {
   const labels = lastNDaysLabels(days);
   const start = new Date(labels[0] + "T00:00:00.000Z");
   const prevStart = new Date(start);
   prevStart.setUTCDate(prevStart.getUTCDate() - days);
 
-  // Current window: all redemptions from `start` to now for this merchant
+  // Current window: only REDEEMED rows from `start` to now for this merchant
   const currRows = await prisma.redemption.findMany({
     where: {
-      deal: { merchantId },        // via Deal relation
-      redeemedAt: { gte: start },  // use redeemedAt field
+      deal: { merchantId }, // via Deal relation
+      redeemedAt: {
+        not: null as any,   // ✅ only redeemed rows
+        gte: start,
+      },
     },
     select: { redeemedAt: true },
   });
 
-  // Previous window: redemptions in the `days`-window before `start`
+  // Previous window: only REDEEMED rows in the window before `start`
   const prevRows = await prisma.redemption.findMany({
     where: {
       deal: { merchantId },
       redeemedAt: {
+        not: null as any,   // ✅ only redeemed rows
         gte: prevStart,
         lt: start,
       },
@@ -57,6 +58,7 @@ export async function redemptionSeriesWithTrend(
   labels.forEach((k) => buckets.set(k, 0));
 
   for (const r of currRows) {
+    if (!r.redeemedAt) continue; // ✅ TS + safety guard
     const key = r.redeemedAt.toISOString().slice(0, 10);
     if (buckets.has(key)) {
       buckets.set(key, (buckets.get(key) || 0) + 1);
@@ -67,8 +69,7 @@ export async function redemptionSeriesWithTrend(
   const total = data.reduce((a, b) => a + b, 0);
   const prevTotal = prevRows.length;
 
-  const deltaPct =
-    prevTotal === 0 ? 100 : ((total - prevTotal) / prevTotal) * 100;
+  const deltaPct = prevTotal === 0 ? 100 : ((total - prevTotal) / prevTotal) * 100;
 
   return { labels, data, total, prevTotal, deltaPct };
 }
@@ -77,10 +78,7 @@ export async function redemptionSeriesWithTrend(
  * Deals-created timeseries for the last N days, plus pct change vs prior window.
  * Uses Deal.createdAt and Deal.merchantId.
  */
-export async function dealCreatedSeriesWithTrend(
-  merchantId: string,
-  days = 14
-) {
+export async function dealCreatedSeriesWithTrend(merchantId: string, days = 14) {
   const labels = lastNDaysLabels(days);
   const start = new Date(labels[0] + "T00:00:00.000Z");
   const prevStart = new Date(start);
@@ -122,8 +120,7 @@ export async function dealCreatedSeriesWithTrend(
   const total = data.reduce((a, b) => a + b, 0);
   const prevTotal = prevRows.length;
 
-  const deltaPct =
-    prevTotal === 0 ? 100 : ((total - prevTotal) / prevTotal) * 100;
+  const deltaPct = prevTotal === 0 ? 100 : ((total - prevTotal) / prevTotal) * 100;
 
   return { labels, data, total, prevTotal, deltaPct };
 }
