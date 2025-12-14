@@ -15,44 +15,15 @@ function getDealStatus(deal: { startsAt: Date; endsAt: Date }) {
 }
 
 export default async function MerchantProfileViewPage() {
-  // ✅ FIX: await because createSupabaseServer() is async
+  // ✅ Correct: create Supabase server client (async)
   const supabase = await createSupabaseServer();
 
-  // -----------------------
-  // SAFE AUTH BLOCK
-  // -----------------------
-  let user: { id: string; email?: string | null } | null = null;
-
-  try {
-    const {
-      data: { user: supaUser },
-      error,
-    } = await supabase.auth.getUser();
-
-    if (error) {
-      // No session: send them to sign-in instead of crashing
-      if ((error as any).name === "AuthSessionMissingError") {
-        redirect("/auth/sign-in?next=/merchant/profile");
-      }
-
-      console.error("[/merchant/profile] auth error:", error);
-      redirect("/auth/sign-in?next=/merchant/profile");
-    }
-
-    if (!supaUser) {
-      redirect("/auth/sign-in?next=/merchant/profile");
-    }
-
-    user = supaUser;
-  } catch (err: any) {
-    // Some versions actually THROW AuthSessionMissingError
-    if (err?.name === "AuthSessionMissingError") {
-      redirect("/auth/sign-in?next=/merchant/profile");
-    }
-
-    console.error("[/merchant/profile] unexpected auth error:", err);
-    redirect("/auth/sign-in?next=/merchant/profile");
-  }
+  // ✅ IMPORTANT:
+  // - redirect() throws a NEXT_REDIRECT internally (normal Next behavior)
+  // - Don't catch and console.error it, or it looks like a crash in dev overlay
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
 
   if (!user) {
     redirect("/auth/sign-in?next=/merchant/profile");
@@ -67,10 +38,7 @@ export default async function MerchantProfileViewPage() {
     merchant = await prisma.merchant.create({
       data: {
         userId: user.id,
-        name:
-          (user as any).user_metadata?.business_name ||
-          user.email?.split("@")[0] ||
-          "New merchant",
+        name: (user as any).user_metadata?.business_name || user.email?.split("@")[0] || "New merchant",
         description: "",
         category: "",
         city: "",
@@ -183,7 +151,9 @@ export default async function MerchantProfileViewPage() {
           <p className="text-xs font-medium text-slate-500">Active deals</p>
           <p className="mt-2 text-2xl font-semibold text-slate-900">{activeDeals}</p>
           <p className="mt-1 text-[11px] text-slate-500">
-            {totalDeals > 0 ? `${upcomingDeals} upcoming · ${endedDeals} ended` : "Create your first deal to get started."}
+            {totalDeals > 0
+              ? `${upcomingDeals} upcoming · ${endedDeals} ended`
+              : "Create your first deal to get started."}
           </p>
         </div>
 
@@ -214,9 +184,8 @@ export default async function MerchantProfileViewPage() {
         </div>
       </section>
 
-      {/* (rest of your JSX unchanged from what you already have) */}
-      {/* Keep the rest as-is to avoid UI regressions */}
-      {/* ... */}
+      {/* Keep the rest of your JSX below unchanged (your existing dashboard UI) */}
+      {/* recentDeals, profile completion, etc... */}
     </main>
   );
 }
