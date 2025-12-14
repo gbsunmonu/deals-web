@@ -33,13 +33,44 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "dealId is required" }, { status: 400 });
     }
 
+    // ✅ Fetch deal + maxRedemptions so we can enforce “only 1 free item”, etc.
     const deal = await prisma.deal.findUnique({
       where: { id: dealId },
-      select: { id: true },
+      select: { id: true, maxRedemptions: true, endsAt: true, startsAt: true },
     });
 
     if (!deal) {
       return NextResponse.json({ error: "Deal not found" }, { status: 404 });
+    }
+
+    // Optional: prevent generating codes for expired deals
+    const now = new Date();
+    if (deal.endsAt && deal.endsAt < now) {
+      return NextResponse.json(
+        { error: "This deal has expired", status: "EXPIRED" },
+        { status: 400 }
+      );
+    }
+
+    // ✅ Enforce capacity ONLY if maxRedemptions is set (null/undefined = unlimited)
+    if (typeof deal.maxRedemptions === "number" && deal.maxRedemptions > 0) {
+      const redeemedCount = await prisma.redemption.count({
+        where: {
+          dealId,
+          redeemedAt: { not: null as any },
+        },
+      });
+
+      if (redeemedCount >= deal.maxRedemptions) {
+        return NextResponse.json(
+          {
+            ok: false,
+            status: "SOLD_OUT",
+            error: "This deal has been fully redeemed.",
+          },
+          { status: 409 }
+        );
+      }
     }
 
     // Create redemption row (NOT redeemed yet)
