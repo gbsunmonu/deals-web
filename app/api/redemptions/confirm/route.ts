@@ -1,6 +1,7 @@
 // app/api/redemptions/confirm/route.ts
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
+import type { Prisma } from "@prisma/client";
 
 // Backwards compatible payloads we may receive from QR scans:
 // 1) A URL: https://your-domain.com/r/<shortCode>
@@ -29,8 +30,7 @@ async function generateUniqueRedemptionShortCode() {
 }
 
 /**
- * Retry wrapper for SERIALIZATION / transaction conflicts.
- * With SELECT ... FOR UPDATE this is rare, but retries keep things robust.
+ * Retry wrapper for transaction conflicts.
  */
 async function withTxnRetry<T>(fn: () => Promise<T>, retries = 3): Promise<T> {
   let lastErr: any;
@@ -40,19 +40,16 @@ async function withTxnRetry<T>(fn: () => Promise<T>, retries = 3): Promise<T> {
     } catch (e: any) {
       lastErr = e;
 
-      // Prisma can throw P2034 for transaction conflicts/timeouts.
-      // Also some Postgres conflicts surface differently; retry is safe for our idempotent flow.
       const code = e?.code;
-      const msg = String(e?.message ?? "");
+      const msg = String(e?.message ?? "").toLowerCase();
       const shouldRetry =
         code === "P2034" ||
-        msg.toLowerCase().includes("serialization") ||
-        msg.toLowerCase().includes("deadlock") ||
-        msg.toLowerCase().includes("could not serialize access");
+        msg.includes("serialization") ||
+        msg.includes("deadlock") ||
+        msg.includes("could not serialize access");
 
       if (!shouldRetry || i === retries - 1) throw e;
 
-      // small backoff
       await new Promise((r) => setTimeout(r, 30 * (i + 1)));
     }
   }
@@ -60,15 +57,12 @@ async function withTxnRetry<T>(fn: () => Promise<T>, retries = 3): Promise<T> {
 }
 
 /**
- * Lock deal row + check capacity in the SAME transaction.
- * This prevents the "last redemption" race condition.
+ * Concurrency-safe: lock deal row + check capacity inside the SAME transaction.
  */
 async function lockDealAndEnforceCapacity(
-  tx: typeof prisma,
+  tx: Prisma.TransactionClient,
   dealId: string
 ): Promise<{ max: number | null; redeemedCount: number; soldOut: boolean }> {
-  // Lock the deal row (Postgres) so only one redemption can pass capacity check at a time.
-  // Prisma model names become quoted tables by default: "Deal"
   const rows = await tx.$queryRaw<Array<{ id: string; maxRedemptions: number | null }>>`
     SELECT "id", "maxRedemptions"
     FROM "Deal"
@@ -94,8 +88,7 @@ async function lockDealAndEnforceCapacity(
     where: { dealId, redeemedAt: { not: null } },
   });
 
-  const soldOut = redeemedCount >= max;
-  return { max, redeemedCount, soldOut };
+  return { max, redeemedCount, soldOut: redeemedCount >= max };
 }
 
 export async function POST(req: NextRequest) {
@@ -167,14 +160,19 @@ export async function POST(req: NextRequest) {
           return NextResponse.json({ error: "QR expiry is invalid" }, { status: 400 });
         }
         if (expires < new Date()) {
-          return NextResponse.json({ ok: false, status: "EXPIRED", error: "This QR code has expired." }, { status: 410 });
+          return NextResponse.json(
+            { ok: false, status: "EXPIRED", error: "This QR code has expired." },
+            { status: 410 }
+          );
         }
       }
 
-      // ✅ Concurrency-safe: transaction + deal row lock + capacity check + create redeemed record
       return await withTxnRetry(async () => {
         const result = await prisma.$transaction(async (tx) => {
-          const { soldOut, max, redeemedCount } = await lockDealAndEnforceCapacity(tx, legacy.dealId);
+          const { soldOut, max, redeemedCount } = await lockDealAndEnforceCapacity(
+            tx,
+            legacy.dealId
+          );
 
           if (soldOut) {
             return { kind: "SOLD_OUT" as const, max, redeemedCount };
@@ -185,17 +183,17 @@ export async function POST(req: NextRequest) {
           const redemption = await tx.redemption.create({
             data: {
               dealId: legacy.dealId,
-              code: scannedCode,          // legacy raw payload
-              shortCode,                  // unique human code
+              code: scannedCode,
+              shortCode,
               redeemedAt: new Date(),
-              // These exist in your schema now; legacy flow doesn't have device info.
-              expiresAt: new Date(Date.now() + 5 * 60 * 1000), // short safety ttl for legacy entries
+              // If your schema requires these:
+              expiresAt: new Date(Date.now() + 5 * 60 * 1000),
               deviceHash: "legacy",
             } as any,
             select: { id: true, redeemedAt: true, shortCode: true },
           });
 
-          return { kind: "REDEEMED" as const, redemption, max, redeemedCount };
+          return { kind: "REDEEMED" as const, redemption };
         });
 
         if (result.kind === "SOLD_OUT") {
@@ -218,17 +216,14 @@ export async function POST(req: NextRequest) {
     }
 
     // -------------------------
-    // NORMAL FLOW (shortCode/code lookup) — CONCURRENCY SAFE
+    // NORMAL FLOW — CONCURRENCY SAFE
     // -------------------------
     return await withTxnRetry(async () => {
-      const out = await prisma.$transaction(async (tx) => {
-        const now = new Date();
+      const now = new Date();
 
-        // Look up the redemption first (inside the transaction)
+      const out = await prisma.$transaction(async (tx) => {
         const redemption = await tx.redemption.findFirst({
-          where: {
-            OR: [{ shortCode: scannedCode }, { code: scannedCode }],
-          },
+          where: { OR: [{ shortCode: scannedCode }, { code: scannedCode }] },
           include: {
             deal: {
               include: {
@@ -240,68 +235,45 @@ export async function POST(req: NextRequest) {
           },
         });
 
-        if (!redemption) {
-          return { kind: "NOT_FOUND" as const };
-        }
+        if (!redemption) return { kind: "NOT_FOUND" as const };
 
-        // Expiry (if you have expiresAt in schema)
-        if ((redemption as any).expiresAt) {
-          const exp = new Date((redemption as any).expiresAt);
-          if (!Number.isNaN(exp.getTime()) && exp <= now) {
-            // Mark it unusable (optional). We keep it simple: just return expired.
-            return { kind: "EXPIRED" as const };
-          }
+        // expiry check (if exists)
+        const exp = (redemption as any).expiresAt ? new Date((redemption as any).expiresAt) : null;
+        if (exp && !Number.isNaN(exp.getTime()) && exp <= now) {
+          return { kind: "EXPIRED" as const };
         }
 
         if (redemption.redeemedAt) {
           return { kind: "ALREADY_REDEEMED" as const, redeemedAt: redemption.redeemedAt };
         }
 
-        // ✅ Lock deal + enforce capacity inside the same transaction
+        // lock deal + enforce capacity
         const { soldOut } = await lockDealAndEnforceCapacity(tx, redemption.dealId);
-        if (soldOut) {
-          return { kind: "SOLD_OUT" as const };
-        }
+        if (soldOut) return { kind: "SOLD_OUT" as const };
 
-        // ✅ Single-winner update: only redeem if still unredeemed and not expired
-        const updateWhere: any = {
-          id: redemption.id,
-          redeemedAt: null,
-        };
-
-        // also enforce not expired at update time
-        if ((redemption as any).expiresAt) {
-          updateWhere.expiresAt = { gt: now };
-        }
+        // winner-takes-all update
+        const where: any = { id: redemption.id, redeemedAt: null };
+        if ((redemption as any).expiresAt) where.expiresAt = { gt: now };
 
         const updated = await tx.redemption.updateMany({
-          where: updateWhere,
-          data: {
-            redeemedAt: now,
-            activeKey: null, // if your schema has activeKey; safe to keep in `as any`
-          } as any,
+          where,
+          data: { redeemedAt: now } as any,
         });
 
         if (updated.count === 0) {
-          // Someone else redeemed it (or it expired) between our read and update
-          // Re-check status
           const again = await tx.redemption.findUnique({
             where: { id: redemption.id },
             select: { redeemedAt: true, expiresAt: true },
           });
 
-          if (again?.redeemedAt) {
-            return { kind: "ALREADY_REDEEMED" as const, redeemedAt: again.redeemedAt };
-          }
+          if (again?.redeemedAt) return { kind: "ALREADY_REDEEMED" as const, redeemedAt: again.redeemedAt };
 
-          if ((again as any)?.expiresAt && new Date((again as any).expiresAt) <= now) {
-            return { kind: "EXPIRED" as const };
-          }
+          const exp2 = (again as any)?.expiresAt ? new Date((again as any).expiresAt) : null;
+          if (exp2 && exp2 <= now) return { kind: "EXPIRED" as const };
 
           return { kind: "CONFLICT" as const };
         }
 
-        // Fetch redeemedAt for response
         const redeemedRow = await tx.redemption.findUnique({
           where: { id: redemption.id },
           select: { id: true, redeemedAt: true },
@@ -328,14 +300,12 @@ export async function POST(req: NextRequest) {
       if (out.kind === "NOT_FOUND") {
         return NextResponse.json({ error: "Redemption code not found" }, { status: 404 });
       }
-
       if (out.kind === "EXPIRED") {
         return NextResponse.json(
           { ok: false, status: "EXPIRED", error: "This QR code has expired." },
           { status: 410 }
         );
       }
-
       if (out.kind === "ALREADY_REDEEMED") {
         return NextResponse.json(
           {
@@ -347,14 +317,12 @@ export async function POST(req: NextRequest) {
           { status: 409 }
         );
       }
-
       if (out.kind === "SOLD_OUT") {
         return NextResponse.json(
           { ok: false, status: "SOLD_OUT", error: "This deal has been fully redeemed." },
           { status: 409 }
         );
       }
-
       if (out.kind === "CONFLICT") {
         return NextResponse.json(
           { ok: false, status: "CONFLICT", error: "Could not redeem. Please try again." },
