@@ -1,10 +1,11 @@
+// app/api/redemptions/confirm/route.ts
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 
-// Backwards compatible payloads we may receive from QR scans:
-// 1) A URL: https://your-domain.com/r/<shortCode>
-// 2) A plain short code: ABC123
-// 3) Old JSON payloads (legacy): {"type":"DEAL","dealId":"...","expiresAt":"..."}
+// Accept:
+// 1) URL: https://domain/r/<shortCode>
+// 2) Short code: ABC123
+// 3) Legacy JSON payloads: {"type":"DEAL","dealId":"...","expiresAt":"..."}
 type LegacyDealQrPayload = {
   type: "DEAL";
   dealId: string;
@@ -24,120 +25,56 @@ async function generateUniqueRedemptionShortCode() {
     });
     if (!exists) return shortCode;
   }
-  // fallback (very unlikely)
   return makeShortCode(8);
 }
 
-/**
- * Capacity enforcement, but safe under concurrency by running inside
- * a SERIALIZABLE transaction.
- */
-async function confirmRedemptionWithCapacity(redemptionId: string) {
-  return prisma.$transaction(
-    async (tx) => {
-      // Load redemption + deal inside the tx
-      const redemption = await tx.redemption.findUnique({
-        where: { id: redemptionId },
-        select: {
-          id: true,
-          redeemedAt: true,
-          dealId: true,
-          shortCode: true,
-          code: true,
-          deal: {
-            select: {
-              id: true,
-              title: true,
-              originalPrice: true,
-              discountValue: true,
-              discountType: true,
-              startsAt: true,
-              endsAt: true,
-              maxRedemptions: true,
-              merchant: {
-                select: { id: true, name: true, city: true, address: true, phone: true },
-              },
-            },
-          },
-        },
-      });
+async function enforceDealCapacityOrThrow(dealId: string) {
+  const deal = await prisma.deal.findUnique({
+    where: { id: dealId },
+    select: { id: true, maxRedemptions: true },
+  });
 
-      if (!redemption) {
-        const err: any = new Error("Redemption code not found");
-        err.status = 404;
-        err.code = "NOT_FOUND";
-        throw err;
-      }
+  if (!deal) {
+    const err: any = new Error("Deal not found");
+    err.status = 404;
+    err.code = "DEAL_NOT_FOUND";
+    throw err;
+  }
 
-      if (redemption.redeemedAt) {
-        const err: any = new Error("This QR code has already been redeemed.");
-        err.status = 409;
-        err.code = "ALREADY_REDEEMED";
-        err.redeemedAt = redemption.redeemedAt;
-        throw err;
-      }
+  const max = deal.maxRedemptions;
 
-      const deal = redemption.deal;
-      const now = new Date();
+  // null/undefined/0 => unlimited
+  if (typeof max !== "number" || max <= 0) return;
 
-      // Expiry/valid window enforcement
-      if (deal.startsAt && deal.startsAt > now) {
-        const err: any = new Error("This deal has not started yet.");
-        err.status = 400;
-        err.code = "NOT_STARTED";
-        throw err;
-      }
-      if (deal.endsAt && deal.endsAt < now) {
-        const err: any = new Error("This deal has expired.");
-        err.status = 400;
-        err.code = "EXPIRED";
-        throw err;
-      }
-
-      // Capacity enforcement
-      const max = deal.maxRedemptions;
-      if (typeof max === "number" && max > 0) {
-        const redeemedCount = await tx.redemption.count({
-          where: {
-            dealId: deal.id,
-            redeemedAt: { not: null as any },
-          },
-        });
-
-        if (redeemedCount >= max) {
-          const err: any = new Error("This deal has been fully redeemed.");
-          err.status = 409;
-          err.code = "SOLD_OUT";
-          throw err;
-        }
-      }
-
-      // Mark redeemed
-      const updated = await tx.redemption.update({
-        where: { id: redemption.id },
-        data: { redeemedAt: new Date() },
-        select: { id: true, redeemedAt: true },
-      });
-
-      // Compute savings for response
-      const original = deal.originalPrice ?? 0;
-      const discount = deal.discountValue ?? 0;
-      const hasDiscount = discount > 0 && original > 0;
-      const discountedPrice = hasDiscount
-        ? Math.round(original - (original * discount) / 100)
-        : original || null;
-      const savingsAmount =
-        hasDiscount && discountedPrice != null ? original - discountedPrice : null;
-
-      return {
-        updated,
-        deal,
-        merchant: deal.merchant,
-        computed: { discountedPrice, savingsAmount },
-      };
+  const redeemedCount = await prisma.redemption.count({
+    where: {
+      dealId,
+      redeemedAt: { not: null },
     },
-    { isolationLevel: "Serializable" }
-  );
+  });
+
+  if (redeemedCount >= max) {
+    const err: any = new Error("This deal has been fully redeemed.");
+    err.status = 409;
+    err.code = "SOLD_OUT";
+    throw err;
+  }
+}
+
+function extractCode(rawText: string): string {
+  const maybeUrl = rawText.trim();
+
+  if (/^https?:\/\//i.test(maybeUrl)) {
+    try {
+      const u = new URL(maybeUrl);
+      const parts = u.pathname.split("/").filter(Boolean);
+      return parts.length ? parts[parts.length - 1] : maybeUrl;
+    } catch {
+      return maybeUrl;
+    }
+  }
+
+  return maybeUrl;
 }
 
 export async function POST(req: NextRequest) {
@@ -168,23 +105,9 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "QR text is empty" }, { status: 400 });
     }
 
-    // --- 1) If it's a URL (/r/<code>), extract the last segment.
-    const maybeUrl = rawText;
-    let scannedCode: string | null = null;
+    const scannedCode = extractCode(rawText);
 
-    if (/^https?:\/\//i.test(maybeUrl)) {
-      try {
-        const u = new URL(maybeUrl);
-        const parts = u.pathname.split("/").filter(Boolean);
-        scannedCode = parts.length ? parts[parts.length - 1] : null;
-      } catch {
-        // fall through
-      }
-    }
-
-    if (!scannedCode) scannedCode = maybeUrl.trim();
-
-    // --- 2) Legacy JSON payload support (older QR format)
+    // --- Legacy JSON payload support
     if (scannedCode.startsWith("{") && scannedCode.endsWith("}")) {
       let legacy: LegacyDealQrPayload;
       try {
@@ -203,40 +126,31 @@ export async function POST(req: NextRequest) {
           return NextResponse.json({ error: "QR expiry is invalid" }, { status: 400 });
         }
         if (expires < new Date()) {
-          return NextResponse.json({ error: "This QR code has expired" }, { status: 400 });
+          return NextResponse.json({ ok: false, status: "EXPIRED", error: "This QR code has expired." }, { status: 410 });
         }
       }
 
-      // For legacy: capacity + expiry should still apply.
-      const deal = await prisma.deal.findUnique({
-        where: { id: legacy.dealId },
-        select: { id: true, startsAt: true, endsAt: true, maxRedemptions: true },
-      });
-
-      if (!deal) return NextResponse.json({ error: "Deal not found" }, { status: 404 });
-
-      const now = new Date();
-      if (deal.startsAt && deal.startsAt > now) {
-        return NextResponse.json({ error: "This deal has not started yet.", status: "NOT_STARTED" }, { status: 400 });
-      }
-      if (deal.endsAt && deal.endsAt < now) {
-        return NextResponse.json({ error: "This deal has expired", status: "EXPIRED" }, { status: 400 });
-      }
-
-      if (typeof deal.maxRedemptions === "number" && deal.maxRedemptions > 0) {
-        const redeemedCount = await prisma.redemption.count({
-          where: { dealId: deal.id, redeemedAt: { not: null as any } },
-        });
-
-        if (redeemedCount >= deal.maxRedemptions) {
+      // enforce capacity
+      try {
+        await enforceDealCapacityOrThrow(legacy.dealId);
+      } catch (e: any) {
+        if (e?.code === "SOLD_OUT") {
           return NextResponse.json(
             { ok: false, status: "SOLD_OUT", error: "This deal has been fully redeemed." },
             { status: 409 }
           );
         }
+        if (e?.status === 404) {
+          return NextResponse.json({ error: "Deal not found" }, { status: 404 });
+        }
+        console.error("[/api/redemptions/confirm] capacity check error:", e);
+        return NextResponse.json(
+          { error: "Unexpected error confirming redemption", details: e?.message ?? String(e) },
+          { status: 500 }
+        );
       }
 
-      // Create an immediate redeemed record (legacy behavior)
+      // legacy creates redeemed record immediately
       try {
         const shortCode = await generateUniqueRedemptionShortCode();
         const redemption = await prisma.redemption.create({
@@ -245,6 +159,9 @@ export async function POST(req: NextRequest) {
             code: scannedCode,
             shortCode,
             redeemedAt: new Date(),
+            expiresAt: new Date(Date.now() + 15 * 60 * 1000),
+            deviceHash: "legacy",
+            activeKey: null,
           },
           select: { id: true, redeemedAt: true, shortCode: true },
         });
@@ -274,83 +191,115 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // --- 3) Normal flow: find redemption row then confirm inside SERIALIZABLE tx
-    const found = await prisma.redemption.findFirst({
-      where: { OR: [{ shortCode: scannedCode }, { code: scannedCode }] },
-      select: { id: true },
+    // --- Normal flow: find redemption by shortCode or code
+    const redemption = await prisma.redemption.findFirst({
+      where: {
+        OR: [{ shortCode: scannedCode }, { code: scannedCode }],
+      },
+      include: {
+        deal: {
+          include: {
+            merchant: {
+              select: { id: true, name: true, city: true, address: true, phone: true },
+            },
+          },
+        },
+      },
     });
 
-    if (!found) {
+    if (!redemption) {
       return NextResponse.json({ error: "Redemption code not found" }, { status: 404 });
     }
 
-    try {
-      const result = await confirmRedemptionWithCapacity(found.id);
-
-      const deal = result.deal;
+    // ✅ expiry check (15 minutes)
+    const now = new Date();
+    if (redemption.expiresAt && redemption.expiresAt <= now && !redemption.redeemedAt) {
+      // clear activeKey so they can generate a new QR
+      await prisma.redemption.update({
+        where: { id: redemption.id },
+        data: { activeKey: null },
+        select: { id: true },
+      });
 
       return NextResponse.json(
-        {
-          ok: true,
-          status: "REDEEMED",
-          message: "Redemption successful.",
-          deal: {
-            id: deal.id,
-            title: deal.title,
-            originalPrice: deal.originalPrice,
-            discountValue: deal.discountValue,
-            discountType: deal.discountType,
-            discountedPrice: result.computed.discountedPrice,
-            savingsAmount: result.computed.savingsAmount,
-            startsAt: deal.startsAt,
-            endsAt: deal.endsAt,
-            maxRedemptions: deal.maxRedemptions,
-          },
-          merchant: result.merchant,
-          redemption: { id: result.updated.id, redeemedAt: result.updated.redeemedAt },
-        },
-        { status: 200 }
+        { ok: false, status: "EXPIRED", error: "This QR code has expired. Please generate a new one." },
+        { status: 410 }
       );
+    }
+
+    if (redemption.redeemedAt) {
+      return NextResponse.json(
+        {
+          ok: false,
+          status: "ALREADY_REDEEMED",
+          error: "This QR code has already been redeemed.",
+          redeemedAt: redemption.redeemedAt,
+        },
+        { status: 409 }
+      );
+    }
+
+    // ✅ capacity check before redeeming
+    try {
+      await enforceDealCapacityOrThrow(redemption.dealId);
     } catch (e: any) {
-      if (e?.code === "ALREADY_REDEEMED") {
-        return NextResponse.json(
-          {
-            ok: false,
-            status: "ALREADY_REDEEMED",
-            error: "This QR code has already been redeemed.",
-            redeemedAt: e.redeemedAt ?? null,
-          },
-          { status: 409 }
-        );
-      }
       if (e?.code === "SOLD_OUT") {
         return NextResponse.json(
           { ok: false, status: "SOLD_OUT", error: "This deal has been fully redeemed." },
           { status: 409 }
         );
       }
-      if (e?.code === "NOT_STARTED") {
-        return NextResponse.json(
-          { ok: false, status: "NOT_STARTED", error: "This deal has not started yet." },
-          { status: 400 }
-        );
-      }
-      if (e?.code === "EXPIRED") {
-        return NextResponse.json(
-          { ok: false, status: "EXPIRED", error: "This deal has expired." },
-          { status: 400 }
-        );
-      }
       if (e?.status === 404) {
-        return NextResponse.json({ error: "Redemption code not found" }, { status: 404 });
+        return NextResponse.json({ error: "Deal not found" }, { status: 404 });
       }
-
-      console.error("[/api/redemptions/confirm] error:", e);
+      console.error("[/api/redemptions/confirm] capacity check error:", e);
       return NextResponse.json(
         { error: "Unexpected error confirming redemption", details: e?.message ?? String(e) },
         { status: 500 }
       );
     }
+
+    // ✅ redeem and clear lock
+    const updated = await prisma.redemption.update({
+      where: { id: redemption.id },
+      data: {
+        redeemedAt: new Date(),
+        activeKey: null, // unlock for future QR
+      },
+      select: { id: true, redeemedAt: true },
+    });
+
+    const deal = redemption.deal;
+    const original = deal.originalPrice ?? 0;
+    const discount = deal.discountValue ?? 0;
+    const hasDiscount = discount > 0 && original > 0;
+    const discountedPrice = hasDiscount
+      ? Math.round(original - (original * discount) / 100)
+      : original || null;
+    const savingsAmount = hasDiscount && discountedPrice != null ? original - discountedPrice : null;
+
+    return NextResponse.json(
+      {
+        ok: true,
+        status: "REDEEMED",
+        message: "Redemption successful.",
+        deal: {
+          id: deal.id,
+          title: deal.title,
+          originalPrice: deal.originalPrice,
+          discountValue: deal.discountValue,
+          discountType: deal.discountType,
+          discountedPrice,
+          savingsAmount,
+          startsAt: deal.startsAt,
+          endsAt: deal.endsAt,
+          maxRedemptions: deal.maxRedemptions ?? null,
+        },
+        merchant: deal.merchant,
+        redemption: { id: updated.id, redeemedAt: updated.redeemedAt },
+      },
+      { status: 200 }
+    );
   } catch (err: any) {
     console.error("Unexpected error in /api/redemptions/confirm:", err);
     return NextResponse.json(
