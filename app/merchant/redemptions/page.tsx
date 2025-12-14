@@ -2,15 +2,16 @@
 import prisma from "@/lib/prisma";
 import RedeemForm from "@/components/RedeemForm";
 
-const MERCHANT_ID =
-  process.env.DEMO_MERCHANT_ID || "5b635f61-8a37-4b25-b21b-f02e8547edad";
+const MERCHANT_ID = "5b635f61-8a37-4b25-b21b-f02e8547edad"; // same dummy ID you use elsewhere
 
 function formatCurrency(amount: number | null | undefined) {
   if (amount == null || Number.isNaN(amount)) return "-";
   return `₦${amount.toLocaleString("en-NG")}`;
 }
 
-function formatDateTime(date: Date) {
+// ✅ accept null now (because redeemedAt is DateTime? in Prisma)
+function formatDateTime(date: Date | null | undefined) {
+  if (!date) return "—";
   return date.toLocaleString("en-GB", {
     day: "2-digit",
     month: "short",
@@ -88,15 +89,14 @@ export default async function MerchantRedemptionsPage() {
               <tbody>
                 {redemptions.map((r) => {
                   const deal = r.deal;
+
                   const original = deal.originalPrice ?? 0;
                   const finalPrice =
                     original && deal.discountValue
-                      ? Math.round(
-                          (original * (100 - deal.discountValue)) / 100
-                        )
+                      ? Math.round((original * (100 - deal.discountValue)) / 100)
                       : null;
                   const savings =
-                    original && finalPrice ? original - finalPrice : null;
+                    original && finalPrice != null ? original - finalPrice : null;
 
                   return (
                     <tr
