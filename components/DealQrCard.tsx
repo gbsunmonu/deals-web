@@ -17,69 +17,60 @@ function formatCountdown(ms: number) {
   return `${m}:${String(s).padStart(2, "0")}`;
 }
 
-export default function DealQrCard({
-  id,
-  title,
-  merchantName,
-  endsAtIso,
-}: Props) {
+function fmtTimeHHMM(ms: number) {
+  return new Date(ms).toLocaleTimeString("en-GB", {
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+export default function DealQrCard({ id, title, merchantName, endsAtIso }: Props) {
   const [copied, setCopied] = useState(false);
   const [now, setNow] = useState(() => Date.now());
 
-  // ⏱ Tick every second
+  // ✅ This changes whenever we regenerate (forces a new expiresAt + payload + qr)
+  const [regenKey, setRegenKey] = useState(0);
+
+  // ⏱ Tick every second for countdown
   useEffect(() => {
     const t = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(t);
   }, []);
 
-  const {
-    payload,
-    qrUrl,
-    expiresAt,
-    isExpired,
-    countdownLabel,
-    expiryDateLabel,
-  } = useMemo(() => {
-    const dealEndsAt = new Date(endsAtIso).getTime();
+  const { payload, qrUrl, expiresAt, isExpired, countdownLabel, expiryTimeLabel } =
+    useMemo(() => {
+      const dealEndsAt = new Date(endsAtIso).getTime();
 
-    // ✅ QR expires in 15 minutes OR when deal ends (whichever comes first)
-    const qrExpiresAt = Math.min(
-      Date.now() + 15 * 60 * 1000,
-      dealEndsAt
-    );
+      // ✅ QR expires in 15 minutes OR when deal ends (whichever comes first)
+      const qrExpiresAt = Math.min(Date.now() + 15 * 60 * 1000, dealEndsAt);
 
-    const payloadObj = {
-      type: "DEAL",
-      dealId: id,
-      expiresAt: new Date(qrExpiresAt).toISOString(),
-    };
+      const payloadObj = {
+        type: "DEAL",
+        dealId: id,
+        expiresAt: new Date(qrExpiresAt).toISOString(),
+      };
 
-    const payload = JSON.stringify(payloadObj);
+      const payload = JSON.stringify(payloadObj);
 
-    const qrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=240x240&data=${encodeURIComponent(
-      payload
-    )}`;
+      // use external QR API so you don't need extra dependencies
+      const qrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=240x240&data=${encodeURIComponent(
+        payload
+      )}`;
 
-    const isExpired = now >= qrExpiresAt;
+      const isExpired = now >= qrExpiresAt;
+      const countdownLabel = isExpired ? "Expired" : formatCountdown(qrExpiresAt - now);
+      const expiryTimeLabel = fmtTimeHHMM(qrExpiresAt);
 
-    const countdownLabel = isExpired
-      ? "Expired"
-      : formatCountdown(qrExpiresAt - now);
-
-    const expiryDateLabel = new Date(qrExpiresAt).toLocaleTimeString("en-GB", {
-      hour: "2-digit",
-      minute: "2-digit",
-    });
-
-    return {
-      payload,
-      qrUrl,
-      expiresAt: qrExpiresAt,
-      isExpired,
-      countdownLabel,
-      expiryDateLabel,
-    };
-  }, [id, endsAtIso, now]);
+      return {
+        payload,
+        qrUrl,
+        expiresAt: qrExpiresAt,
+        isExpired,
+        countdownLabel,
+        expiryTimeLabel,
+      };
+      // regenKey forces a fresh expiresAt/payload/qrUrl
+    }, [id, endsAtIso, now, regenKey]);
 
   async function handleCopy() {
     try {
@@ -91,6 +82,11 @@ export default function DealQrCard({
     }
   }
 
+  function handleRegenerate() {
+    setCopied(false);
+    setRegenKey((k) => k + 1);
+  }
+
   return (
     <div className="mx-auto max-w-md rounded-3xl border border-gray-200 bg-white px-6 py-6 shadow-sm">
       {/* Header */}
@@ -98,12 +94,8 @@ export default function DealQrCard({
         <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-400">
           Deal QR code
         </p>
-        <h1 className="mt-1 text-lg font-bold tracking-tight text-gray-900">
-          {title}
-        </h1>
-        {merchantName && (
-          <p className="mt-1 text-xs text-gray-600">at {merchantName}</p>
-        )}
+        <h1 className="mt-1 text-lg font-bold tracking-tight text-gray-900">{title}</h1>
+        {merchantName && <p className="mt-1 text-xs text-gray-600">at {merchantName}</p>}
         <p className="mt-1 text-[11px] text-gray-500">
           Show this QR code at checkout. It expires automatically.
         </p>
@@ -131,22 +123,48 @@ export default function DealQrCard({
         <div
           className={[
             "rounded-full px-4 py-1 text-sm font-semibold",
-            isExpired
-              ? "bg-red-100 text-red-700"
-              : "bg-emerald-100 text-emerald-800",
+            isExpired ? "bg-red-100 text-red-700" : "bg-emerald-100 text-emerald-800",
           ].join(" ")}
         >
-          {isExpired
-            ? "QR expired"
-            : `Expires in ${countdownLabel}`}
+          {isExpired ? "QR expired" : `Expires in ${countdownLabel}`}
         </div>
 
         {/* Info */}
         <p className="text-[11px] text-gray-500 text-center">
-          Valid until{" "}
-          <span className="font-semibold">{expiryDateLabel}</span>.  
-          Each QR can only be redeemed once.
+          Valid until <span className="font-semibold">{expiryTimeLabel}</span>. Each QR can only be
+          redeemed once.
         </p>
+
+        {/* ✅ CTA Buttons */}
+        <div className="flex w-full items-center justify-center gap-2">
+          <button
+            type="button"
+            onClick={handleRegenerate}
+            className={[
+              "rounded-full px-4 py-2 text-sm font-semibold shadow-sm transition",
+              isExpired
+                ? "bg-emerald-600 text-white hover:bg-emerald-700"
+                : "border border-gray-300 text-gray-800 hover:bg-gray-50",
+            ].join(" ")}
+            title="Generate a fresh QR code"
+          >
+            {isExpired ? "Regenerate QR" : "Refresh QR"}
+          </button>
+
+          <button
+            type="button"
+            onClick={handleCopy}
+            disabled={isExpired}
+            className={[
+              "rounded-full px-4 py-2 text-sm font-semibold shadow-sm transition",
+              isExpired
+                ? "bg-gray-200 text-gray-400 cursor-not-allowed"
+                : "bg-gray-900 text-white hover:bg-black",
+            ].join(" ")}
+          >
+            {copied ? "Copied ✓" : "Copy code"}
+          </button>
+        </div>
 
         {/* Raw payload fallback */}
         <div className="mt-2 w-full rounded-2xl border border-gray-200 bg-gray-50 px-3 py-3">
@@ -156,26 +174,10 @@ export default function DealQrCard({
           <pre className="max-h-24 overflow-x-auto whitespace-pre-wrap break-all rounded-md bg-white px-2 py-1 text-[11px] text-gray-800">
             {payload}
           </pre>
-          <div className="mt-2 flex justify-end">
-            <button
-              type="button"
-              onClick={handleCopy}
-              disabled={isExpired}
-              className={[
-                "rounded-full border px-3 py-1 text-[11px] font-semibold transition",
-                isExpired
-                  ? "border-gray-300 text-gray-400 cursor-not-allowed"
-                  : "border-gray-300 text-gray-700 hover:bg-gray-100",
-              ].join(" ")}
-            >
-              {copied ? "Copied ✓" : "Copy code"}
-            </button>
-          </div>
         </div>
 
         <p className="mt-2 text-[10px] text-gray-400 text-center">
-          Keep this page open while at the counter.  
-          Do not share your QR publicly.
+          Keep this page open while at the counter. Do not share your QR publicly.
         </p>
       </div>
     </div>
