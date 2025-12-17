@@ -12,6 +12,10 @@ function yyyyMmDd(d: Date) {
   return `${yyyy}-${mm}-${dd}`;
 }
 
+function isValidYYYYMMDD(s: string) {
+  return /^\d{4}-\d{2}-\d{2}$/.test(s);
+}
+
 export default function NewDealPage() {
   const router = useRouter();
   const [isPending, startTransition] = useTransition();
@@ -33,6 +37,9 @@ export default function NewDealPage() {
     d.setDate(d.getDate() + 7);
     return yyyyMmDd(d);
   });
+
+  // ✅ NEW: start immediately toggle
+  const [startImmediately, setStartImmediately] = useState(true);
 
   const [inventoryMode, setInventoryMode] = useState<InventoryMode>("UNLIMITED");
   const [maxRedemptions, setMaxRedemptions] = useState<string>("");
@@ -86,13 +93,17 @@ export default function NewDealPage() {
       return;
     }
 
-    // Optional: simple date sanity check
-    if (!startDate || startDate.length !== 10) {
+    // ✅ date sanity checks
+    if (!isValidYYYYMMDD(startDate)) {
       setError("Valid startDate (YYYY-MM-DD) is required.");
       return;
     }
-    if (!endDate || endDate.length !== 10) {
+    if (!isValidYYYYMMDD(endDate)) {
       setError("Valid endDate (YYYY-MM-DD) is required.");
+      return;
+    }
+    if (endDate < startDate) {
+      setError("endDate cannot be before startDate.");
       return;
     }
 
@@ -111,9 +122,12 @@ export default function NewDealPage() {
             discountType: disc > 0 ? "PERCENT" : "NONE",
             imageUrl: finalImageUrl,
 
-            // ✅ send DATE-ONLY fields (backend will convert to 23:59)
+            // ✅ keep your existing API contract
             startDate,
             endDate,
+
+            // ✅ NEW: optional flag (backend can use; safe if ignored)
+            startNow: startImmediately,
 
             inventoryMode,
             maxRedemptions: max,
@@ -139,7 +153,7 @@ export default function NewDealPage() {
       <header className="mb-6">
         <h1 className="text-3xl font-semibold text-slate-900">Create new deal</h1>
         <p className="mt-1 text-sm text-slate-500">
-          Date-only: we automatically set start/end to 23:59.
+          Deals only show in Explore when they are within their start/end window.
         </p>
       </header>
 
@@ -229,9 +243,20 @@ export default function NewDealPage() {
           </div>
         </section>
 
-        {/* ✅ Date-only timing */}
+        {/* ✅ Timing */}
         <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-          <h2 className="text-sm font-semibold text-slate-900">Timing</h2>
+          <div className="flex items-center justify-between gap-4">
+            <h2 className="text-sm font-semibold text-slate-900">Timing</h2>
+
+            <label className="flex items-center gap-2 text-sm text-slate-700">
+              <input
+                type="checkbox"
+                checked={startImmediately}
+                onChange={(e) => setStartImmediately(e.target.checked)}
+              />
+              Start immediately
+            </label>
+          </div>
 
           <div className="mt-3 grid gap-3 sm:grid-cols-2">
             <div>
@@ -242,11 +267,14 @@ export default function NewDealPage() {
                 type="date"
                 value={startDate}
                 onChange={(e) => setStartDate(e.target.value)}
-                className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm focus:border-emerald-500 focus:outline-none focus:ring-1 focus:ring-emerald-500"
-                required
+                disabled={startImmediately}
+                className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm disabled:opacity-60 focus:border-emerald-500 focus:outline-none focus:ring-1 focus:ring-emerald-500"
+                required={!startImmediately}
               />
               <p className="mt-1 text-[11px] text-slate-500">
-                We assume 23:59 for the start time.
+                {startImmediately
+                  ? "This deal will be live immediately after creation."
+                  : "This deal will go live on the start date (23:59 logic happens on backend)."}
               </p>
             </div>
 
@@ -262,7 +290,7 @@ export default function NewDealPage() {
                 required
               />
               <p className="mt-1 text-[11px] text-slate-500">
-                We assume 23:59 for the end time.
+                We’ll treat the end date as the last day of availability.
               </p>
             </div>
           </div>
