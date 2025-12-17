@@ -47,6 +47,11 @@ async function withTxnRetry<T>(fn: () => Promise<T>, retries = 3): Promise<T> {
   throw lastErr;
 }
 
+/**
+ * ✅ IMPORTANT:
+ * Deal.id is UUID. When dealId is a string param, Postgres can error (uuid=text).
+ * Cast inside SQL.
+ */
 async function lockDealAndEnforceCapacity(
   tx: Prisma.TransactionClient,
   dealId: string
@@ -67,6 +72,7 @@ async function lockDealAndEnforceCapacity(
 
   const max = rows[0].maxRedemptions;
 
+  // unlimited if null/undefined/<=0
   if (typeof max !== "number" || max <= 0) {
     return { max: max ?? null, redeemedCount: 0, soldOut: false };
   }
@@ -108,6 +114,7 @@ export async function POST(req: NextRequest) {
 
     let scannedCode: string | null = null;
 
+    // allow scanning a URL that ends with /<shortCode>
     if (/^https?:\/\//i.test(rawText)) {
       try {
         const u = new URL(rawText);
@@ -123,18 +130,26 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "QR code is empty" }, { status: 400 });
     }
 
-    // Legacy JSON payload support
+    // ----------------------------
+    // LEGACY JSON payload support
+    // ----------------------------
     if (scannedCode.startsWith("{") && scannedCode.endsWith("}")) {
       let legacy: LegacyDealQrPayload;
 
       try {
         legacy = JSON.parse(scannedCode);
       } catch {
-        return NextResponse.json({ error: "QR code is not a valid deal code" }, { status: 400 });
+        return NextResponse.json(
+          { error: "QR code is not a valid deal code" },
+          { status: 400 }
+        );
       }
 
       if (legacy.type !== "DEAL" || !legacy.dealId) {
-        return NextResponse.json({ error: "QR code is not a valid deal code" }, { status: 400 });
+        return NextResponse.json(
+          { error: "QR code is not a valid deal code" },
+          { status: 400 }
+        );
       }
 
       if (legacy.expiresAt) {
@@ -192,7 +207,9 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    // Normal flow (expiry + concurrency safe)
+    // ----------------------------
+    // NORMAL FLOW (expiry + safe)
+    // ----------------------------
     return await withTxnRetry(async () => {
       const now = new Date();
 
@@ -212,10 +229,9 @@ export async function POST(req: NextRequest) {
 
         if (!redemption) return { kind: "NOT_FOUND" as const };
 
-        // Expired?
+        // expired? -> unlock device
         const exp = redemption.expiresAt ? new Date(redemption.expiresAt) : null;
         if (exp && !Number.isNaN(exp.getTime()) && exp <= now) {
-          // important: clear activeKey so device can generate again
           await tx.redemption.update({
             where: { id: redemption.id },
             data: { activeKey: null },
@@ -230,7 +246,7 @@ export async function POST(req: NextRequest) {
         const { soldOut } = await lockDealAndEnforceCapacity(tx, redemption.dealId);
         if (soldOut) return { kind: "SOLD_OUT" as const };
 
-        // redeem only if still valid & not redeemed
+        // redeem only if still valid & not redeemed, also release device lock
         const updated = await tx.redemption.updateMany({
           where: { id: redemption.id, redeemedAt: null, expiresAt: { gt: now } },
           data: { redeemedAt: now, activeKey: null },
@@ -242,11 +258,16 @@ export async function POST(req: NextRequest) {
             select: { redeemedAt: true, expiresAt: true },
           });
 
-          if (again?.redeemedAt) return { kind: "ALREADY_REDEEMED" as const, redeemedAt: again.redeemedAt };
+          if (again?.redeemedAt) {
+            return { kind: "ALREADY_REDEEMED" as const, redeemedAt: again.redeemedAt };
+          }
 
           const exp2 = again?.expiresAt ? new Date(again.expiresAt) : null;
           if (exp2 && exp2 <= now) {
-            await tx.redemption.update({ where: { id: redemption.id }, data: { activeKey: null } });
+            await tx.redemption.update({
+              where: { id: redemption.id },
+              data: { activeKey: null },
+            });
             return { kind: "EXPIRED" as const };
           }
 
