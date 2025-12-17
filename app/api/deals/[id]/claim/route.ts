@@ -3,6 +3,9 @@ import { prisma } from "@/lib/prisma";
 import type { Prisma } from "@prisma/client";
 import crypto from "crypto";
 
+const QR_TTL_MINUTES = 15;
+const COOLDOWN_SECONDS = 20; // ✅ per-device cooldown between NEW QR generations
+
 function sha256(input: string) {
   return crypto.createHash("sha256").update(input).digest("hex");
 }
@@ -64,11 +67,12 @@ async function lockDealAndCheckSoldOut(
 
   const deal = rows[0];
 
+  // Only allow claim while deal is live
   if (deal.startsAt > now) return { ok: false, status: 409, error: "Deal has not started yet" };
   if (deal.endsAt < now) return { ok: false, status: 409, error: "Deal has ended" };
 
   const max = deal.maxRedemptions;
-  if (typeof max !== "number" || max <= 0) return { ok: true };
+  if (typeof max !== "number" || max <= 0) return { ok: true }; // unlimited
 
   const redeemedCount = await tx.redemption.count({
     where: { dealId, redeemedAt: { not: null } },
@@ -85,9 +89,9 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
 
     const deviceId = req.headers.get("x-device-id") || req.headers.get("x-device") || "";
 
-    if (!dealId) return NextResponse.json({ error: "Missing deal id" }, { status: 400 });
+    if (!dealId) return NextResponse.json({ ok: false, error: "Missing deal id" }, { status: 400 });
     if (!deviceId || deviceId.length < 8) {
-      return NextResponse.json({ error: "Missing device id" }, { status: 400 });
+      return NextResponse.json({ ok: false, error: "Missing device id" }, { status: 400 });
     }
 
     const deviceHash = sha256(deviceId);
@@ -95,67 +99,98 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
 
     const result = await withTxnRetry(async () => {
       return prisma.$transaction(async (tx) => {
+        // ✅ ensure deal is live + not sold out
         const gate = await lockDealAndCheckSoldOut(tx, dealId);
         if (!gate.ok) return { kind: "ERR" as const, status: gate.status, error: gate.error };
 
         const now = new Date();
 
+        // ✅ 1) Reuse active QR if it exists & still valid
         const existing = await tx.redemption.findFirst({
           where: { activeKey },
-          select: { id: true, shortCode: true, redeemedAt: true, expiresAt: true },
+          select: {
+            id: true,
+            shortCode: true,
+            code: true,
+            redeemedAt: true,
+            expiresAt: true, // may be nullable in YOUR DB right now, so we guard
+          },
         });
 
         if (existing) {
+          const exp = existing.expiresAt ? new Date(existing.expiresAt) : null;
+
+          // If already redeemed → unlock
           if (existing.redeemedAt) {
-            await tx.redemption.update({
-              where: { id: existing.id },
-              data: { activeKey: null },
-            });
-          } else if (existing.expiresAt && existing.expiresAt > now) {
+            await tx.redemption.update({ where: { id: existing.id }, data: { activeKey: null } });
+          } else if (exp && exp > now) {
+            // ✅ still valid → reuse
             return {
               kind: "OK" as const,
               redemptionId: existing.id,
               shortCode: existing.shortCode,
-              expiresAt: existing.expiresAt.toISOString(),
+              expiresAt: exp.toISOString(),
               reused: true,
             };
           } else {
-            await tx.redemption.update({
-              where: { id: existing.id },
-              data: { activeKey: null },
-            });
+            // expired OR expiresAt missing → unlock
+            await tx.redemption.update({ where: { id: existing.id }, data: { activeKey: null } });
           }
         }
 
+        // ✅ 2) Per-device cooldown (only applies when generating a NEW QR)
+        const latest = await tx.redemption.findFirst({
+          where: { dealId, deviceHash },
+          orderBy: { createdAt: "desc" },
+          select: { id: true, createdAt: true },
+        });
+
+        if (latest) {
+          const ageMs = now.getTime() - new Date(latest.createdAt).getTime();
+          const cooldownMs = COOLDOWN_SECONDS * 1000;
+
+          if (ageMs < cooldownMs) {
+            const retryAfterSec = Math.ceil((cooldownMs - ageMs) / 1000);
+            return {
+              kind: "ERR" as const,
+              status: 429,
+              error: `Please wait ${retryAfterSec}s before generating a new QR.`,
+              retryAfterSec,
+            };
+          }
+        }
+
+        // ✅ 3) Create new QR (locked to this device+deal for 15 minutes)
         const shortCode = await generateUniqueShortCode(tx);
-        const expiresAt = new Date(Date.now() + 15 * 60 * 1000);
+        const expiresAt = new Date(Date.now() + QR_TTL_MINUTES * 60 * 1000);
 
         const created = await tx.redemption.create({
           data: {
             dealId,
             shortCode,
-            code: shortCode,
+            code: shortCode, // confirm route accepts shortCode OR code
             redeemedAt: null,
-            createdAt: now,
-            expiresAt,
+            expiresAt, // required, but DB might allow null; we still set it
             deviceHash,
             activeKey,
           },
-          select: { id: true, shortCode: true }, // ✅ don't select expiresAt to avoid nullable typing
+          select: { id: true, shortCode: true },
         });
 
         return {
           kind: "OK" as const,
           redemptionId: created.id,
           shortCode: created.shortCode,
-          expiresAt: expiresAt.toISOString(), // ✅ use our local non-null expiresAt
+          expiresAt: expiresAt.toISOString(), // ✅ use local expiresAt (never null)
           reused: false,
         };
       });
     });
 
     if (result.kind === "ERR") {
-      return NextResponse.json({ ok: false, error: result.error }, { status: result.status });
+      const headers: Record<string, string> = {};
+      if ((result as any).retryAfterSec) headers["Retry-After"] = String((result as any).retryAfterSec);
+      return NextResponse.json({ ok: false, error: result.error }, { status: result.status, headers });
     }
 
     return NextResponse.json(
