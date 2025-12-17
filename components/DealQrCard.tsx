@@ -42,14 +42,14 @@ export default function DealQrCard({ id, title, merchantName, endsAtIso }: Props
 
   const [copied, setCopied] = useState(false);
 
-  // ✅ cooldown UI state
+  // cooldown UI state
   const [cooldownUntilMs, setCooldownUntilMs] = useState<number>(0);
   const cooldownMsLeft = Math.max(0, cooldownUntilMs - now);
   const inCooldown = cooldownMsLeft > 0;
 
   const [err, setErr] = useState<string | null>(null);
 
-  // origin safe
+  // origin safe (avoid SSR window crash)
   const [origin, setOrigin] = useState<string>("");
   useEffect(() => {
     try {
@@ -59,6 +59,7 @@ export default function DealQrCard({ id, title, merchantName, endsAtIso }: Props
     }
   }, []);
 
+  // tick every second for countdowns
   useEffect(() => {
     const t = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(t);
@@ -68,7 +69,7 @@ export default function DealQrCard({ id, title, merchantName, endsAtIso }: Props
     setErr(null);
     setCopied(false);
 
-    // ✅ block clicks while cooldown active
+    // block clicks while cooldown active
     if (inCooldown) {
       setErr(`Cooldown active. Try again in ${formatCountdown(cooldownMsLeft)}.`);
       return;
@@ -91,9 +92,9 @@ export default function DealQrCard({ id, title, merchantName, endsAtIso }: Props
 
       const data = await res.json().catch(() => ({}));
 
-      // ✅ handle cooldown payload (recommended server response: 429 + cooldownSeconds)
+      // cooldown response
       if (res.status === 429) {
-        const seconds = Number(data?.cooldownSeconds || data?.retryAfterSeconds || 0);
+        const seconds = Number(data?.cooldownSeconds || data?.retryAfterSeconds || data?.retryAfterSec || 0);
         if (seconds > 0) {
           setCooldownUntilMs(Date.now() + seconds * 1000);
           setErr(`Too many attempts. Try again in ${formatCountdown(seconds * 1000)}.`);
@@ -116,6 +117,7 @@ export default function DealQrCard({ id, title, merchantName, endsAtIso }: Props
     }
   }
 
+  // initial claim
   useEffect(() => {
     claimOrRefresh();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -154,10 +156,14 @@ export default function DealQrCard({ id, title, merchantName, endsAtIso }: Props
   return (
     <div className="mx-auto max-w-md rounded-3xl border border-gray-200 bg-white px-6 py-6 shadow-sm">
       <div className="mb-4 text-center">
-        <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-400">Deal QR code</p>
+        <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-400">Your QR code</p>
         <h1 className="mt-1 text-lg font-bold tracking-tight text-gray-900">{title}</h1>
         {merchantName && <p className="mt-1 text-xs text-gray-600">at {merchantName}</p>}
-        <p className="mt-1 text-[11px] text-gray-500">This QR is locked to your device and expires in 15 minutes.</p>
+
+        {/* ✅ Option A message */}
+        <p className="mt-2 text-[11px] text-gray-500">
+          Keep this page open at the counter. For safety, QR codes can’t be downloaded and expire in 15 minutes.
+        </p>
       </div>
 
       {err && (
@@ -168,7 +174,8 @@ export default function DealQrCard({ id, title, merchantName, endsAtIso }: Props
 
       {inCooldown && (
         <div className="mb-4 rounded-2xl border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
-          ⏳ Cooldown active — try again in <span className="font-semibold">{formatCountdown(cooldownMsLeft)}</span>.
+          ⏳ Cooldown active — try again in{" "}
+          <span className="font-semibold">{formatCountdown(cooldownMsLeft)}</span>.
         </div>
       )}
 
@@ -216,6 +223,7 @@ export default function DealQrCard({ id, title, merchantName, endsAtIso }: Props
           </div>
         )}
 
+        {/* ✅ Keep “Redeem page” action */}
         {!!shortCode && (
           <Link
             href={`/redeem/${shortCode}`}
@@ -270,7 +278,7 @@ export default function DealQrCard({ id, title, merchantName, endsAtIso }: Props
         </div>
 
         <p className="mt-2 text-[10px] text-gray-400 text-center">
-          Don’t share your QR publicly. If it expires, regenerate.
+          Don’t share your QR publicly. If it expires, regenerate a new one.
         </p>
       </div>
     </div>

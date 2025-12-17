@@ -1,12 +1,13 @@
-// components/DealQrSection.tsx
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { QRCodeCanvas } from "qrcode.react";
 
 type DealQrSectionProps = {
   dealId: string;
   dealTitle: string;
+
+  // DEAL expiry (endsAt). Only shown as "Deal valid until".
   expiresAtIso: string;
 };
 
@@ -17,44 +18,42 @@ export default function DealQrSection({
   dealTitle,
   expiresAtIso,
 }: DealQrSectionProps) {
-  const [shareUrl, setShareUrl] = useState<string>("");
-  const qrCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const [baseUrl, setBaseUrl] = useState<string>("");
+  const qrCanvasWrapRef = useRef<HTMLDivElement | null>(null);
 
-  // Build the share URL on the client so it works both locally and on Vercel
+  // ✅ Build base URL on the client (works on localhost + Vercel)
   useEffect(() => {
     const base =
       typeof window !== "undefined" && window.location.origin
         ? window.location.origin
         : APP_URL || "";
-    if (!base) return;
+    setBaseUrl(base);
+  }, []);
 
-    setShareUrl(`${base}/r/${dealId}`);
-  }, [dealId]);
+  // ✅ SAFE QR: opens the QR page (that generates the 15-min redeem QR)
+  const qrPageUrl = useMemo(() => {
+    if (!baseUrl) return "";
+    return `${baseUrl}/deals/${dealId}/qr`;
+  }, [baseUrl, dealId]);
 
-  // QR payload – this is what the QR actually encodes
-  const qrPayload = JSON.stringify({
-    v: 1,
-    d: dealId,
-    t: "deal",
-  });
+  const dealEndsAt = useMemo(() => new Date(expiresAtIso), [expiresAtIso]);
 
-  const expiresAt = new Date(expiresAtIso);
-
-  function handleDownloadQr() {
-    const canvas = qrCanvasRef.current;
+  function handleDownloadLinkQr() {
+    // qrcode.react renders a <canvas> inside the wrapper
+    const canvas = qrCanvasWrapRef.current?.querySelector("canvas");
     if (!canvas) return;
 
     const dataUrl = canvas.toDataURL("image/png");
     const link = document.createElement("a");
     link.href = dataUrl;
-    link.download = `deal-qr-${dealId}.png`;
+    link.download = `dealina-link-qr-${dealId}.png`;
     link.click();
   }
 
   async function handleCopyLink() {
-    if (!shareUrl) return;
+    if (!qrPageUrl) return;
     try {
-      await navigator.clipboard.writeText(shareUrl);
+      await navigator.clipboard.writeText(qrPageUrl);
       alert("Link copied to clipboard");
     } catch (err) {
       console.error("Copy failed:", err);
@@ -62,37 +61,45 @@ export default function DealQrSection({
     }
   }
 
-  const whatsappUrl = shareUrl
+  const whatsappUrl = qrPageUrl
     ? `https://wa.me/?text=${encodeURIComponent(
-        `Show this QR to redeem: ${shareUrl}`
+        `Claim this deal (QR will be generated on the page): ${qrPageUrl}`
       )}`
     : "";
 
   return (
     <section className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
-      <h2 className="text-sm font-semibold text-slate-900">QR code for this deal</h2>
-      <p className="mt-1 text-xs text-slate-500">
-        Show this QR at the merchant to redeem. Each QR can only be used once.
-      </p>
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <h2 className="text-sm font-semibold text-slate-900">Your QR code</h2>
+          <p className="mt-1 text-xs text-slate-500">
+            This QR is a <span className="font-semibold">safe link</span>. It opens your QR page, where the real redeem QR is generated and expires in{" "}
+            <span className="font-semibold">15 minutes</span>.
+          </p>
+        </div>
+
+        <span className="inline-flex items-center rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 text-[11px] font-semibold text-emerald-800">
+          ✅ Safe link QR
+        </span>
+      </div>
 
       <div className="mt-4 flex flex-col gap-4 md:flex-row md:items-center">
         {/* QR on the left */}
-        <div className="flex shrink-0 items-center justify-center rounded-2xl bg-slate-50 p-4">
-          <QRCodeCanvas
-            value={qrPayload}
-            size={220}
-            includeMargin
-            ref={qrCanvasRef}
-          />
+        <div
+          ref={qrCanvasWrapRef}
+          className="flex shrink-0 items-center justify-center rounded-2xl bg-slate-50 p-4"
+        >
+          <QRCodeCanvas value={qrPageUrl || " "} size={220} includeMargin />
         </div>
 
         {/* Info + actions on the right */}
         <div className="flex-1 text-xs text-slate-600">
           <p className="font-semibold text-slate-900">{dealTitle}</p>
+
           <p className="mt-1">
-            Expires on{" "}
+            Deal valid until{" "}
             <span className="font-medium">
-              {expiresAt.toLocaleDateString("en-NG", {
+              {dealEndsAt.toLocaleDateString("en-NG", {
                 day: "2-digit",
                 month: "short",
                 year: "numeric",
@@ -100,25 +107,55 @@ export default function DealQrSection({
             </span>
           </p>
 
-          {shareUrl && (
+          {qrPageUrl && (
             <p className="mt-2 break-all text-[11px] text-slate-500">
-              Direct link: <span className="font-mono">{shareUrl}</span>
+              QR page link: <span className="font-mono">{qrPageUrl}</span>
             </p>
           )}
 
           <div className="mt-3 flex flex-wrap gap-2">
+            <a
+              href={qrPageUrl || "#"}
+              className={[
+                "rounded-full bg-emerald-600 px-4 py-2 text-xs font-semibold text-white hover:bg-emerald-700",
+                !qrPageUrl ? "pointer-events-none opacity-60" : "",
+              ].join(" ")}
+            >
+              Claim deal (QR) →
+            </a>
+
+            <a
+              href={qrPageUrl || "#"}
+              target="_blank"
+              rel="noreferrer"
+              className={[
+                "rounded-full border border-slate-200 px-4 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50",
+                !qrPageUrl ? "pointer-events-none opacity-60" : "",
+              ].join(" ")}
+            >
+              Open in new tab
+            </a>
+
             <button
               type="button"
-              onClick={handleDownloadQr}
-              className="rounded-full bg-emerald-600 px-4 py-1.5 text-xs font-semibold text-white hover:bg-emerald-700"
+              onClick={handleDownloadLinkQr}
+              disabled={!qrPageUrl}
+              className={[
+                "rounded-full border border-slate-200 px-4 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50",
+                !qrPageUrl ? "cursor-not-allowed opacity-60" : "",
+              ].join(" ")}
             >
-              Download QR
+              Download link QR
             </button>
 
             <button
               type="button"
               onClick={handleCopyLink}
-              className="rounded-full border border-slate-200 px-4 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+              disabled={!qrPageUrl}
+              className={[
+                "rounded-full border border-slate-200 px-4 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50",
+                !qrPageUrl ? "cursor-not-allowed opacity-60" : "",
+              ].join(" ")}
             >
               Copy link
             </button>
@@ -128,12 +165,16 @@ export default function DealQrSection({
                 href={whatsappUrl}
                 target="_blank"
                 rel="noreferrer"
-                className="rounded-full border border-slate-200 px-4 py-1.5 text-xs font-semibold text-emerald-700 hover:bg-emerald-50"
+                className="rounded-full border border-slate-200 px-4 py-2 text-xs font-semibold text-emerald-700 hover:bg-emerald-50"
               >
                 Share via WhatsApp
               </a>
             )}
           </div>
+
+          <p className="mt-3 text-[11px] text-slate-500">
+            ✅ Downloaded QR stays valid because it’s only a link. The real redeem QR is generated on the QR page and expires in 15 minutes.
+          </p>
         </div>
       </div>
     </section>
