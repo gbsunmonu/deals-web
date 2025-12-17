@@ -69,7 +69,7 @@ export default function ExploreGridClient({ deals }: { deals: DealRow[] }) {
   useEffect(() => {
     fetchAvailability();
     if (timerRef.current) clearInterval(timerRef.current);
-    timerRef.current = setInterval(fetchAvailability, 5000); // ✅ polling interval
+    timerRef.current = setInterval(fetchAvailability, 5000);
     return () => {
       if (timerRef.current) clearInterval(timerRef.current);
       timerRef.current = null;
@@ -86,7 +86,7 @@ export default function ExploreGridClient({ deals }: { deals: DealRow[] }) {
       ) : (
         <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
           {deals.map((deal) => {
-            const availability = map[deal.id]; // can be undefined at first load
+            const availability = map[deal.id];
 
             return (
               <DealCard
