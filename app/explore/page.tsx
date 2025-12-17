@@ -1,55 +1,40 @@
 // app/explore/page.tsx
 import Link from "next/link";
 import prisma from "@/lib/prisma";
-import DealCard from "@/components/DealCard";
+import ExploreGridClient from "./ExploreGridClient";
 
 type ExplorePageProps = {
-  searchParams?: {
+  searchParams?: Promise<{
     q?: string;
     category?: string;
-  };
+  }>;
 };
 
 export const dynamic = "force-dynamic";
-
-function computeLeftAndSoldOut(max: number | null, redeemedCount: number) {
-  const limited = typeof max === "number" && max > 0;
-  const left = limited ? Math.max(max - redeemedCount, 0) : null;
-  const soldOut = limited ? redeemedCount >= max : false;
-  return { left, soldOut };
-}
+export const revalidate = 0;
 
 export default async function ExplorePage({ searchParams }: ExplorePageProps) {
-  const q = (searchParams?.q ?? "").trim();
-  const category = (searchParams?.category ?? "").trim();
+  const params = (await searchParams) ?? {};
+  const q = (params.q ?? "").trim();
+  const category = (params.category ?? "").trim();
 
   const now = new Date();
 
-  // --- METRICS FOR THE BANNER ------------------------------------
   const [liveDealsCount, startingSoonCount, topDiscountAgg] = await Promise.all([
     prisma.deal.count({
-      where: {
-        startsAt: { lte: now },
-        endsAt: { gte: now },
-      },
+      where: { startsAt: { lte: now }, endsAt: { gte: now } },
     }),
     prisma.deal.count({
-      where: {
-        startsAt: { gt: now },
-      },
+      where: { startsAt: { gt: now } },
     }),
     prisma.deal.aggregate({
       _max: { discountValue: true },
-      where: {
-        startsAt: { lte: now },
-        endsAt: { gte: now },
-      },
+      where: { startsAt: { lte: now }, endsAt: { gte: now } },
     }),
   ]);
 
   const topDiscountValue = topDiscountAgg._max.discountValue ?? 0;
 
-  // --- CATEGORY LIST FOR FILTER ----------------------------------
   const categoryRows = await prisma.merchant.findMany({
     where: { category: { not: null } },
     select: { category: true },
@@ -61,7 +46,6 @@ export default async function ExplorePage({ searchParams }: ExplorePageProps) {
     .map((c) => c.category)
     .filter((c): c is string => !!c);
 
-  // --- DEAL QUERY WITH SEARCH + CATEGORY -------------------------
   const deals = await prisma.deal.findMany({
     where: {
       startsAt: { lte: now },
@@ -80,6 +64,7 @@ export default async function ExplorePage({ searchParams }: ExplorePageProps) {
     select: {
       id: true,
       title: true,
+      description: true, // ✅ add this back
       originalPrice: true,
       discountValue: true,
       discountType: true,
@@ -87,34 +72,10 @@ export default async function ExplorePage({ searchParams }: ExplorePageProps) {
       endsAt: true,
       imageUrl: true,
       maxRedemptions: true,
-      merchant: {
-        select: {
-          id: true,
-          name: true,
-          city: true,
-        },
-      },
+      merchant: { select: { id: true, name: true, city: true } },
     },
-    orderBy: {
-      startsAt: "desc",
-    },
+    orderBy: { startsAt: "desc" },
   });
-
-  // --- REDEEMED COUNTS PER DEAL (only redeemedAt NOT NULL) --------
-  const dealIds = deals.map((d) => d.id);
-  const redeemedCounts = dealIds.length
-    ? await prisma.redemption.groupBy({
-        by: ["dealId"],
-        where: {
-          dealId: { in: dealIds },
-          redeemedAt: { not: null },
-        },
-        _count: { _all: true },
-      })
-    : [];
-
-  const countMap = new Map<string, number>();
-  redeemedCounts.forEach((row) => countMap.set(row.dealId, row._count._all));
 
   return (
     <main className="mx-auto max-w-6xl px-4 py-8">
@@ -132,8 +93,7 @@ export default async function ExplorePage({ searchParams }: ExplorePageProps) {
 
             <p className="max-w-xl text-sm leading-relaxed text-white/90">
               Find discounts from nearby salons, barbers, food spots and more.
-              Tap any card to see full details, pricing, and your Dealina QR
-              code for redemption.
+              Tap any card to see full details, pricing, and your Dealina QR code for redemption.
             </p>
 
             <p className="pt-1 text-[10px] font-semibold uppercase tracking-wide text-white/80">
@@ -242,48 +202,8 @@ export default async function ExplorePage({ searchParams }: ExplorePageProps) {
         </form>
       </section>
 
-      {/* DEAL GRID */}
-      <section aria-label="Live deals">
-        {deals.length === 0 ? (
-          <div className="rounded-2xl border border-dashed border-slate-200 bg-slate-50 px-4 py-10 text-center text-sm text-slate-500">
-            No deals match your search yet. Try clearing filters or checking back later.
-          </div>
-        ) : (
-          <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-            {deals.map((deal) => {
-              const redeemedCount = countMap.get(deal.id) ?? 0;
-              const { left, soldOut } = computeLeftAndSoldOut(
-                deal.maxRedemptions ?? null,
-                redeemedCount
-              );
-
-              return (
-                <DealCard
-                  key={deal.id}
-                  deal={{
-                    id: deal.id,
-                    title: deal.title,
-                    originalPrice: deal.originalPrice,
-                    discountValue: deal.discountValue,
-                    startsAt: deal.startsAt.toISOString(),
-                    endsAt: deal.endsAt.toISOString(),
-                    imageUrl: deal.imageUrl,
-                    maxRedemptions: deal.maxRedemptions ?? null,
-                    redeemedCount,
-                    left,
-                    soldOut,
-                  }}
-                  merchant={{
-                    id: deal.merchant.id,
-                    name: deal.merchant.name,
-                    city: deal.merchant.city,
-                  }}
-                />
-              );
-            })}
-          </div>
-        )}
-      </section>
+      {/* CLIENT GRID: real-time availability + animation */}
+      <ExploreGridClient deals={deals as any} />
     </main>
   );
 }

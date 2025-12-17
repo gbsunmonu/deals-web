@@ -1,9 +1,9 @@
-// lib/supabase-server.ts
+// lib/supabase-route.ts
 import { cookies } from "next/headers";
 import { createServerClient } from "@supabase/ssr";
 
-export async function createSupabaseServer() {
-  const cookieStore = await cookies(); // ✅ Next 16: cookies() is async
+export async function createSupabaseRouteClient() {
+  const cookieStore = await cookies(); // ✅ Next 16
 
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL!;
   const anon = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;

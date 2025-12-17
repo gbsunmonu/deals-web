@@ -71,25 +71,24 @@ model Redemption {
   dealId     String
   deal       Deal     @relation(fields: [dealId], references: [id])
 
-  /// full raw QR payload OR (in our flow) same as shortCode
   code       String   @unique
-
-  /// short human-friendly code for scanning / lookup
   shortCode  String   @unique
 
-  /// ✅ null until redeemed
   redeemedAt DateTime?
 
-  /// ✅ created timestamp
-  createdAt  DateTime @default(now())
+  // ✅ QR expiry (set in code when creating QR)
+  expiresAt  DateTime?
 
-  /// ✅ QR expiry (15 minutes)
-  expiresAt  DateTime
+  // ✅ device lock (optional until you fully enforce it)
+  deviceHash String?
 
-  /// ✅ anonymous device lock (hashed)
-  deviceHash String
-
-  /// ✅ unique active lock key: "<dealId>:<deviceHash>" while active
-  /// set to null after redeem/expire so device can generate again
+  // ✅ unique active lock key while QR is active
   activeKey  String?  @unique
+
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([dealId])
+  @@index([dealId, redeemedAt])
+  @@index([expiresAt])
 }

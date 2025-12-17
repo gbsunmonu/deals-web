@@ -14,7 +14,7 @@
   },
   "dependencies": {
     "@supabase/ssr": "^0.7.0",
-    "@supabase/supabase-js": "^2.83.0",
+    "@supabase/supabase-js": "^2.87.1",
     "@zxing/browser": "^0.1.5",
     "bcryptjs": "^3.0.2",
     "date-fns": "^4.1.0",

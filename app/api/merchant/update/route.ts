@@ -5,16 +5,14 @@ import prisma from "@/lib/prisma";
 
 export async function POST(request: Request) {
   try {
-    const supabase = getServerSupabaseRSC();
+    const supabase = await getServerSupabaseRSC(); // ✅ FIX
+
     const {
       data: { user },
     } = await supabase.auth.getUser();
 
     if (!user) {
-      return NextResponse.json(
-        { error: "Not authenticated" },
-        { status: 401 }
-      );
+      return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
     }
 
     const body = await request.json();
@@ -35,9 +33,6 @@ export async function POST(request: Request) {
     return NextResponse.json({ success: true, merchant: updated });
   } catch (err: any) {
     console.error("UPDATE ERROR:", err);
-    return NextResponse.json(
-      { error: err.message ?? "Update failed" },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: err.message ?? "Update failed" }, { status: 500 });
   }
 }

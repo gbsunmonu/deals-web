@@ -1,17 +1,9 @@
 // app/api/redemptions/create/route.ts
-// Creates a NEW customer redemption code (short code) for a deal,
-// but enforces: 1 active QR per (device + deal) at a time.
-// QR expires after 15 minutes.
-// ✅ NEW: blocks generation if deal is sold out (maxRedemptions reached).
-
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { getOrSetAnonDeviceId, hashDeviceId } from "@/lib/anonDevice";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
-
-const QR_TTL_MINUTES = 15;
 
 function makeShortCode(len = 6) {
   return Math.random().toString(36).substring(2, 2 + len).toUpperCase();
@@ -29,126 +21,167 @@ async function generateUniqueShortCode() {
   return makeShortCode(8);
 }
 
-async function getAvailability(dealId: string) {
-  const deal = await prisma.deal.findUnique({
-    where: { id: dealId },
-    select: { id: true, maxRedemptions: true },
+// Simple device id (cookie-based). Works without login.
+function getOrSetDeviceId(req: NextRequest, res: NextResponse) {
+  const existing = req.cookies.get("dealina_device")?.value;
+  if (existing) return existing;
+
+  const id = crypto.randomUUID();
+  res.cookies.set("dealina_device", id, {
+    httpOnly: true,
+    sameSite: "lax",
+    secure: process.env.NODE_ENV === "production",
+    path: "/",
+    maxAge: 60 * 60 * 24 * 365, // 1 year
   });
+  return id;
+}
 
-  if (!deal) return { exists: false as const };
-
-  const redeemedCount = await prisma.redemption.count({
-    where: { dealId, redeemedAt: { not: null } },
-  });
-
-  const max = deal.maxRedemptions;
+function computeLeftAndSoldOut(max: number | null, redeemedCount: number) {
   const limited = typeof max === "number" && max > 0;
-
   const left = limited ? Math.max(max - redeemedCount, 0) : null;
   const soldOut = limited ? redeemedCount >= max : false;
-
-  return { exists: true as const, max, redeemedCount, left, soldOut };
+  return { left, soldOut };
 }
 
 export async function POST(req: NextRequest) {
-  // we need a response object to set cookies
-  const cookieRes = NextResponse.next();
-
   try {
     const body = await req.json().catch(() => ({}));
-    const dealId = body?.dealId as string | undefined;
+    const dealId = String(body?.dealId || "").trim();
 
-    if (!dealId || typeof dealId !== "string") {
+    if (!dealId) {
       return NextResponse.json({ error: "dealId is required" }, { status: 400 });
     }
 
-    // ✅ Sold out check (prevents QR generation spam)
-    const avail = await getAvailability(dealId);
-    if (!avail.exists) {
+    const res = NextResponse.next();
+    const deviceHash = getOrSetDeviceId(req, res);
+    const activeKey = `${dealId}:${deviceHash}`;
+
+    const now = new Date();
+    const expiresAt = new Date(now.getTime() + 15 * 60 * 1000);
+
+    const out = await prisma.$transaction(async (tx) => {
+      // 0) Clean any expired “activeKey” rows so unique(activeKey) doesn't block
+      await tx.redemption.updateMany({
+        where: { activeKey, redeemedAt: null, expiresAt: { lte: now } },
+        data: { activeKey: null },
+      });
+
+      // 1) If device already has an active QR for this deal and it's still valid → reuse it
+      const existing = await tx.redemption.findFirst({
+        where: {
+          activeKey,
+          redeemedAt: null,
+          expiresAt: { gt: now },
+        },
+        select: {
+          id: true,
+          shortCode: true,
+          code: true,
+          expiresAt: true,
+          dealId: true,
+        },
+      });
+
+      if (existing) {
+        return {
+          kind: "REUSED" as const,
+          shortCode: existing.shortCode,
+          code: existing.code,
+          expiresAt: existing.expiresAt,
+        };
+      }
+
+      // 2) Enforce sold-out (if limited)
+      const deal = await tx.deal.findUnique({
+        where: { id: dealId },
+        select: { id: true, title: true, maxRedemptions: true, endsAt: true, startsAt: true },
+      });
+      if (!deal) return { kind: "DEAL_NOT_FOUND" as const };
+
+      // Deal time validity
+      if (deal.startsAt > now) return { kind: "NOT_STARTED" as const };
+      if (deal.endsAt < now) return { kind: "DEAL_EXPIRED" as const };
+
+      // Capacity (only redeemedAt not null)
+      const redeemedCount = await tx.redemption.count({
+        where: { dealId, redeemedAt: { not: null } },
+      });
+
+      const { left, soldOut } = computeLeftAndSoldOut(deal.maxRedemptions ?? null, redeemedCount);
+
+      if (soldOut) {
+        return {
+          kind: "SOLD_OUT" as const,
+          left,
+          redeemedCount,
+          maxRedemptions: deal.maxRedemptions ?? null,
+        };
+      }
+
+      // 3) Create new QR (15-min expiry)
+      const shortCode = await generateUniqueShortCode();
+
+      const created = await tx.redemption.create({
+        data: {
+          dealId,
+          shortCode,
+          code: shortCode, // simple scan payload
+          redeemedAt: null,
+          createdAt: now,
+          expiresAt,
+          deviceHash,
+          activeKey,
+        },
+        select: { id: true, shortCode: true, expiresAt: true },
+      });
+
+      return {
+        kind: "CREATED" as const,
+        shortCode: created.shortCode,
+        expiresAt: created.expiresAt,
+      };
+    });
+
+    // attach cookie to response (if we generated one)
+    if (out.kind === "DEAL_NOT_FOUND") {
       return NextResponse.json({ error: "Deal not found" }, { status: 404 });
     }
-    if (avail.soldOut) {
+    if (out.kind === "NOT_STARTED") {
+      return NextResponse.json({ ok: false, status: "NOT_STARTED", error: "Deal has not started yet." }, { status: 409 });
+    }
+    if (out.kind === "DEAL_EXPIRED") {
+      return NextResponse.json({ ok: false, status: "DEAL_EXPIRED", error: "Deal has expired." }, { status: 410 });
+    }
+    if (out.kind === "SOLD_OUT") {
       return NextResponse.json(
         {
           ok: false,
           status: "SOLD_OUT",
           error: "This deal is sold out.",
-          left: 0,
-          maxRedemptions: avail.max ?? null,
-          redeemedCount: avail.redeemedCount,
+          left: out.left,
+          redeemedCount: out.redeemedCount,
+          maxRedemptions: out.maxRedemptions,
         },
         { status: 409 }
       );
     }
 
-    // ✅ device lock (no customer account required)
-    const deviceId = getOrSetAnonDeviceId(req, cookieRes);
-    const deviceHash = hashDeviceId(deviceId);
-    const activeKey = `${dealId}:${deviceHash}`;
+    // Success: return JSON with expiresAt for countdown
+    const payload = {
+      ok: true,
+      status: out.kind,
+      shortCode: out.shortCode,
+      expiresAt: out.expiresAt,
+      qrUrl: `/r/${out.shortCode}`,
+      qrText: `${req.nextUrl.origin}/r/${out.shortCode}`,
+    };
 
-    const now = new Date();
-
-    // Reuse an active unredeemed, unexpired QR for this deal+device
-    const existing = await prisma.redemption.findFirst({
-      where: {
-        activeKey,
-        redeemedAt: null,
-        expiresAt: { gt: now },
-      },
-      select: {
-        id: true,
-        code: true,
-        shortCode: true,
-        redeemedAt: true,
-        expiresAt: true,
-      },
-    });
-
-    if (existing) {
-      const out = NextResponse.json(existing, { status: 200 });
-      cookieRes.cookies.getAll().forEach((c) => out.cookies.set(c));
-      return out;
-    }
-
-    // Create a new QR redemption (NOT redeemed yet) - 15 minute expiry
-    const expiresAt = new Date(Date.now() + QR_TTL_MINUTES * 60 * 1000);
-
-    for (let i = 0; i < 6; i++) {
-      const shortCode = await generateUniqueShortCode();
-
-      try {
-        const created = await prisma.redemption.create({
-          data: {
-            dealId,
-            code: shortCode,
-            shortCode,
-            redeemedAt: null,
-            expiresAt,
-            deviceHash,
-            activeKey,
-          },
-          select: {
-            id: true,
-            code: true,
-            shortCode: true,
-            redeemedAt: true,
-            expiresAt: true,
-          },
-        });
-
-        const out = NextResponse.json(created, { status: 201 });
-        cookieRes.cookies.getAll().forEach((c) => out.cookies.set(c));
-        return out;
-      } catch (err: any) {
-        if (err?.code === "P2002") continue;
-        throw err;
-      }
-    }
-
-    return NextResponse.json(
-      { error: "Failed to generate a unique redemption code" },
-      { status: 500 }
-    );
+    // If we used NextResponse.next() for cookie, convert to JSON response while preserving cookie
+    const json = NextResponse.json(payload, { status: 200 });
+    // copy cookies (device id) into the json response
+    for (const c of res.cookies.getAll()) json.cookies.set(c);
+    return json;
   } catch (err: any) {
     console.error("[redemptions/create] error:", err);
     return NextResponse.json(

@@ -1,105 +1,143 @@
-// app/api/merchant/deals/create/route.ts
-
 import { NextRequest, NextResponse } from "next/server";
-import prisma from "@/lib/prisma";
-import { getServerSupabaseRSC } from "@/lib/supabase";
+import { prisma } from "@/lib/prisma";
+import { createSupabaseServer } from "@/lib/supabase-server";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
+// Parse YYYY-MM-DD safely
+function parseYMD(ymd: string) {
+  if (typeof ymd !== "string") return null;
+  const s = ymd.trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return null;
+
+  const [y, m, d] = s.split("-").map((n) => Number(n));
+  if (!y || !m || !d) return null;
+
+  // Use UTC to avoid timezone shifting dates
+  const dt = new Date(Date.UTC(y, m - 1, d, 0, 0, 0, 0));
+  if (Number.isNaN(dt.getTime())) return null;
+
+  // Validate it didn’t roll (e.g. 2025-02-31)
+  if (dt.getUTCFullYear() !== y || dt.getUTCMonth() !== m - 1 || dt.getUTCDate() !== d)
+    return null;
+
+  return dt;
+}
+
+// Set a UTC time on a UTC date
+function withUtcTime(dateOnlyUtc: Date, hours: number, minutes: number) {
+  return new Date(Date.UTC(
+    dateOnlyUtc.getUTCFullYear(),
+    dateOnlyUtc.getUTCMonth(),
+    dateOnlyUtc.getUTCDate(),
+    hours,
+    minutes,
+    0,
+    0
+  ));
+}
+
 export async function POST(req: NextRequest) {
   try {
-    const body = await req.json();
+    const supabase = await createSupabaseServer();
+    const { data: { user }, error } = await supabase.auth.getUser();
 
-    const {
-      title,
-      description,
-      originalPrice,
-      discountValue,
-      startsAt,
-      endsAt,
-      imageUrl,
-    } = body;
+    if (error || !user) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
 
-    // ✅ Basic validation
-    if (!title) {
+    const body = await req.json().catch(() => ({}));
+
+    const title = String(body?.title ?? "").trim();
+    const description = String(body?.description ?? "").trim();
+    const imageUrl = body?.imageUrl ? String(body.imageUrl).trim() : null;
+
+    // match your schema
+    const originalPrice =
+      body?.originalPrice === null || body?.originalPrice === undefined || body?.originalPrice === ""
+        ? null
+        : Number(body.originalPrice);
+
+    const discountValue =
+      body?.discountValue === null || body?.discountValue === undefined || body?.discountValue === ""
+        ? 0
+        : Number(body.discountValue);
+
+    const maxRedemptions =
+      body?.maxRedemptions === null || body?.maxRedemptions === undefined || body?.maxRedemptions === ""
+        ? null
+        : Number(body.maxRedemptions);
+
+    // ✅ required: endDate only (YYYY-MM-DD)
+    const endDateStr = String(body?.endDate ?? "").trim();
+    const endDateOnlyUtc = parseYMD(endDateStr);
+    if (!endDateOnlyUtc) {
       return NextResponse.json(
-        { error: "Title is required" },
+        { error: "Valid endDate (YYYY-MM-DD) is required" },
         { status: 400 }
       );
     }
 
-    if (!startsAt || !endsAt) {
-      return NextResponse.json(
-        { error: "Start and end dates are required" },
-        { status: 400 }
-      );
+    // ✅ starts = today, ends = endDate, both at 11:59 (UTC)
+    const now = new Date();
+    const todayUtc = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+    const startsAt = withUtcTime(todayUtc, 11, 59);
+    const endsAt = withUtcTime(endDateOnlyUtc, 11, 59);
+
+    if (!title) return NextResponse.json({ error: "title is required" }, { status: 400 });
+    if (!description) return NextResponse.json({ error: "description is required" }, { status: 400 });
+
+    if (originalPrice !== null && (!Number.isFinite(originalPrice) || originalPrice < 0)) {
+      return NextResponse.json({ error: "originalPrice must be a valid number" }, { status: 400 });
+    }
+    if (!Number.isFinite(discountValue) || discountValue < 0 || discountValue > 100) {
+      return NextResponse.json({ error: "discountValue must be 0-100" }, { status: 400 });
+    }
+    if (maxRedemptions !== null && (!Number.isFinite(maxRedemptions) || maxRedemptions <= 0)) {
+      return NextResponse.json({ error: "maxRedemptions must be a positive number or null" }, { status: 400 });
+    }
+    if (endsAt <= startsAt) {
+      return NextResponse.json({ error: "endDate must be after today" }, { status: 400 });
     }
 
-    // ✅ Auth: merchant must be logged in
-    const supabase = await getServerSupabaseRSC();
-    const {
-      data: { user },
-    } = await supabase.auth.getUser();
-
-    if (!user) {
-      return NextResponse.json(
-        { error: "Not authenticated" },
-        { status: 401 }
-      );
-    }
-
-    // Find merchant matched to this Supabase user
+    // Find merchant linked to user
     const merchant = await prisma.merchant.findUnique({
       where: { userId: user.id },
+      select: { id: true },
     });
 
     if (!merchant) {
-      return NextResponse.json(
-        { error: "No merchant profile found for this user" },
-        { status: 400 }
-      );
+      return NextResponse.json({ error: "Merchant profile not found" }, { status: 404 });
     }
 
-    // ✅ Make sure description is never null
-    const safeDescription: string =
-      typeof description === "string" && description.trim().length > 0
-        ? description
-        : "";
-
-    // ✅ Normalise price/discount
-    let numericOriginal: number | null = null;
-    if (originalPrice !== undefined && originalPrice !== null && originalPrice !== "") {
-      const n = Number(originalPrice);
-      numericOriginal = Number.isNaN(n) ? null : n;
-    }
-
-    let numericDiscount = 0;
-    if (discountValue !== undefined && discountValue !== null && discountValue !== "") {
-      const n = Number(discountValue);
-      numericDiscount = Number.isNaN(n) ? 0 : n;
-    }
-
-    // ✅ Create deal using ONLY fields from your Prisma model
     const deal = await prisma.deal.create({
       data: {
         title,
-        description: safeDescription,
-        originalPrice: numericOriginal,
-        discountValue: numericDiscount,
-        // discountType defaults to NONE
-        startsAt: new Date(startsAt),
-        endsAt: new Date(endsAt),
-        imageUrl: imageUrl?.trim() || null,
+        description,
+        originalPrice,
+        discountValue,
+        discountType: discountValue > 0 ? "PERCENT" : "NONE",
+        imageUrl: imageUrl || null,
+        maxRedemptions,
+        startsAt,
+        endsAt,
         merchantId: merchant.id,
+      },
+      select: {
+        id: true,
+        title: true,
+        startsAt: true,
+        endsAt: true,
+        maxRedemptions: true,
       },
     });
 
-    return NextResponse.json({ deal }, { status: 201 });
-  } catch (err) {
-    console.error("[MERCHANT DEAL CREATE] error:", err);
+    return NextResponse.json({ ok: true, deal }, { status: 201 });
+  } catch (err: any) {
+    console.error("[/api/merchant/deals/create] error:", err);
     return NextResponse.json(
-      { error: "Failed to create deal" },
+      { error: "Failed to create deal", details: err?.message ?? String(err) },
       { status: 500 }
     );
   }

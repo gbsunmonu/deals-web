@@ -47,11 +47,6 @@ async function withTxnRetry<T>(fn: () => Promise<T>, retries = 3): Promise<T> {
   throw lastErr;
 }
 
-/**
- * ✅ IMPORTANT FIX:
- * Postgres: Deal.id is UUID, but Prisma parameter is text => uuid = text error.
- * We CAST the parameter to uuid inside SQL.
- */
 async function lockDealAndEnforceCapacity(
   tx: Prisma.TransactionClient,
   dealId: string
@@ -72,7 +67,6 @@ async function lockDealAndEnforceCapacity(
 
   const max = rows[0].maxRedemptions;
 
-  // unlimited if null/undefined/<=0
   if (typeof max !== "number" || max <= 0) {
     return { max: max ?? null, redeemedCount: 0, soldOut: false };
   }
@@ -129,7 +123,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "QR code is empty" }, { status: 400 });
     }
 
-    // LEGACY JSON payload
+    // Legacy JSON payload support
     if (scannedCode.startsWith("{") && scannedCode.endsWith("}")) {
       let legacy: LegacyDealQrPayload;
 
@@ -169,8 +163,9 @@ export async function POST(req: NextRequest) {
               code: scannedCode,
               shortCode,
               redeemedAt: new Date(),
-              expiresAt: new Date(Date.now() + 5 * 60 * 1000),
+              expiresAt: new Date(Date.now() + 15 * 60 * 1000),
               deviceHash: "legacy",
+              activeKey: null,
             } as any,
             select: { id: true, redeemedAt: true },
           });
@@ -197,7 +192,7 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    // NORMAL FLOW (concurrency-safe)
+    // Normal flow (expiry + concurrency safe)
     return await withTxnRetry(async () => {
       const now = new Date();
 
@@ -217,8 +212,16 @@ export async function POST(req: NextRequest) {
 
         if (!redemption) return { kind: "NOT_FOUND" as const };
 
-        const exp = (redemption as any).expiresAt ? new Date((redemption as any).expiresAt) : null;
-        if (exp && !Number.isNaN(exp.getTime()) && exp <= now) return { kind: "EXPIRED" as const };
+        // Expired?
+        const exp = redemption.expiresAt ? new Date(redemption.expiresAt) : null;
+        if (exp && !Number.isNaN(exp.getTime()) && exp <= now) {
+          // important: clear activeKey so device can generate again
+          await tx.redemption.update({
+            where: { id: redemption.id },
+            data: { activeKey: null },
+          });
+          return { kind: "EXPIRED" as const };
+        }
 
         if (redemption.redeemedAt) {
           return { kind: "ALREADY_REDEEMED" as const, redeemedAt: redemption.redeemedAt };
@@ -227,12 +230,10 @@ export async function POST(req: NextRequest) {
         const { soldOut } = await lockDealAndEnforceCapacity(tx, redemption.dealId);
         if (soldOut) return { kind: "SOLD_OUT" as const };
 
-        const where: any = { id: redemption.id, redeemedAt: null };
-        if ((redemption as any).expiresAt) where.expiresAt = { gt: now };
-
+        // redeem only if still valid & not redeemed
         const updated = await tx.redemption.updateMany({
-          where,
-          data: { redeemedAt: now } as any,
+          where: { id: redemption.id, redeemedAt: null, expiresAt: { gt: now } },
+          data: { redeemedAt: now, activeKey: null },
         });
 
         if (updated.count === 0) {
@@ -243,8 +244,11 @@ export async function POST(req: NextRequest) {
 
           if (again?.redeemedAt) return { kind: "ALREADY_REDEEMED" as const, redeemedAt: again.redeemedAt };
 
-          const exp2 = (again as any)?.expiresAt ? new Date((again as any).expiresAt) : null;
-          if (exp2 && exp2 <= now) return { kind: "EXPIRED" as const };
+          const exp2 = again?.expiresAt ? new Date(again.expiresAt) : null;
+          if (exp2 && exp2 <= now) {
+            await tx.redemption.update({ where: { id: redemption.id }, data: { activeKey: null } });
+            return { kind: "EXPIRED" as const };
+          }
 
           return { kind: "CONFLICT" as const };
         }

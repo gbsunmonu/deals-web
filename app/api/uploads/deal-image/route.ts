@@ -1,50 +1,54 @@
-// app/api/uploads/deal-image/route.ts
+import { NextRequest, NextResponse } from "next/server";
+import { supabaseAdmin } from "@/lib/supabase-admin";
+import { createSupabaseRouteClient } from "@/lib/supabase-route";
 
-import { NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
 
-export async function POST(req: Request) {
+export async function POST(req: NextRequest) {
   try {
-    const form = await req.formData();
-    const file = form.get("file") as File | null;
+    const supabase = await createSupabaseRouteClient();
+    const { data: { user }, error } = await supabase.auth.getUser();
 
-    if (!file) {
-      return NextResponse.json({ error: "No file uploaded" }, { status: 400 });
+    if (error || !user) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
-    const supabase = createClient(
-      process.env.NEXT_PUBLIC_SUPABASE_URL!,
-      process.env.SUPABASE_SERVICE_ROLE_KEY!
-    );
+    const form = await req.formData();
+    const file = form.get("file");
 
-    const fileName = `${Date.now()}-${file.name.replace(/\s+/g, "_")}`;
-    const arrayBuffer = await file.arrayBuffer();
-    const buffer = Buffer.from(arrayBuffer);
+    if (!(file instanceof File)) {
+      return NextResponse.json({ error: "Missing file" }, { status: 400 });
+    }
 
-    const { data, error } = await supabase.storage
+    const bytes = await file.arrayBuffer();
+    const ext = (file.name.split(".").pop() || "png").toLowerCase();
+    const safeExt = ["png", "jpg", "jpeg", "webp"].includes(ext) ? ext : "png";
+
+    const path = `merchants/${user.id}/${Date.now()}-${Math.random()
+      .toString(16)
+      .slice(2)}.${safeExt}`;
+
+    const { error: upErr } = await supabaseAdmin.storage
       .from("deal-images")
-      .upload(fileName, buffer, {
-        contentType: file.type,
+      .upload(path, Buffer.from(bytes), {
+        contentType: file.type || "image/png",
+        upsert: false,
       });
 
-    if (error) {
-      console.error("Upload error:", error);
+    if (upErr) {
       return NextResponse.json(
-        { error: "Failed to upload image" },
+        { error: "Upload failed", details: upErr.message },
         { status: 500 }
       );
     }
 
-    const publicUrl = `${process.env.NEXT_PUBLIC_SUPABASE_URL}/storage/v1/object/public/deal-images/${data.path}`;
-
-    return NextResponse.json(
-      { url: publicUrl },
-      { status: 200 }
-    );
+    const { data } = supabaseAdmin.storage.from("deal-images").getPublicUrl(path);
+    return NextResponse.json({ ok: true, url: data.publicUrl }, { status: 200 });
   } catch (err: any) {
-    console.error("Upload route error:", err);
+    console.error("[/api/uploads/deal-image] error:", err);
     return NextResponse.json(
-      { error: err.message ?? "Upload failed" },
+      { error: "Upload failed", details: err?.message ?? String(err) },
       { status: 500 }
     );
   }

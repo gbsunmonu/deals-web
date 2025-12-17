@@ -1,347 +1,360 @@
 "use client";
 
-import { FormEvent, useState } from "react";
+import { useMemo, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
-import { createSupabaseBrowser } from "@/lib/supabase-browser";
 
-type CreateDealPayload = {
-  title: string;
-  description: string;
-  originalPrice: number | null;
-  discountValue: number | null;
-  startsAt: string; // ISO date
-  endsAt: string; // ISO date
-  imageUrl?: string | null;
-  maxRedemptions: number | null; // ✅ NEW
-};
+type InventoryMode = "UNLIMITED" | "ONE" | "LIMITED";
+
+function yyyyMmDd(d: Date) {
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd}`;
+}
 
 export default function NewDealPage() {
   const router = useRouter();
-  const [submitting, setSubmitting] = useState(false);
+  const [isPending, startTransition] = useTransition();
+
+  const [title, setTitle] = useState("");
+  const [description, setDescription] = useState("");
+
+  const [originalPrice, setOriginalPrice] = useState<string>("");
+  const [discountValue, setDiscountValue] = useState<string>("0");
+
+  // ✅ Upload + (optional) URL fallback
+  const [imageFile, setImageFile] = useState<File | null>(null);
+  const [imageUrl, setImageUrl] = useState<string>("");
+
+  // ✅ Date only
+  const [startDate, setStartDate] = useState(() => yyyyMmDd(new Date()));
+  const [endDate, setEndDate] = useState(() => {
+    const d = new Date();
+    d.setDate(d.getDate() + 7);
+    return yyyyMmDd(d);
+  });
+
+  const [inventoryMode, setInventoryMode] = useState<InventoryMode>("UNLIMITED");
+  const [maxRedemptions, setMaxRedemptions] = useState<string>("");
+
   const [error, setError] = useState<string | null>(null);
 
-  const [imageFile, setImageFile] = useState<File | null>(null);
-  const [imagePreview, setImagePreview] = useState<string | null>(null);
+  const computedPreview = useMemo(() => {
+    if (inventoryMode === "UNLIMITED") return "Unlimited redemptions until expiry.";
+    if (inventoryMode === "ONE") return "Only 1 total redemption (one free item).";
+    const n = Number(maxRedemptions);
+    if (!Number.isFinite(n) || n <= 0) return "Limited inventory (enter a number).";
+    return `${n} total redemptions available.`;
+  }, [inventoryMode, maxRedemptions]);
 
-  async function handleSubmit(e: FormEvent<HTMLFormElement>) {
-    e.preventDefault();
-    setError(null);
-    setSubmitting(true);
-
-    try {
-      const formData = new FormData(e.currentTarget);
-
-      const title = String(formData.get("title") || "").trim();
-      const description = String(formData.get("description") || "").trim();
-
-      const originalPriceRaw = String(formData.get("originalPrice") || "").trim();
-      const discountValueRaw = String(formData.get("discountValue") || "").trim();
-
-      const startsAt = String(formData.get("startsAt") || "").trim();
-      const endsAt = String(formData.get("endsAt") || "").trim();
-
-      // ✅ NEW: maxRedemptions (optional)
-      const maxRedemptionsRaw = String(formData.get("maxRedemptions") || "").trim();
-
-      // optional manual URL (fallback if no upload)
-      let imageUrl: string | null =
-        String(formData.get("imageUrl") || "").trim() || null;
-
-      if (!title) throw new Error("Please enter a title.");
-
-      let originalPrice: number | null = null;
-      if (originalPriceRaw) {
-        const n = Number(originalPriceRaw.replace(/,/g, ""));
-        if (Number.isNaN(n) || n <= 0) throw new Error("Original price looks invalid.");
-        originalPrice = n;
-      }
-
-      let discountValue: number | null = null;
-      if (discountValueRaw) {
-        const n = Number(discountValueRaw);
-        if (Number.isNaN(n) || n < 0 || n > 100) {
-          throw new Error("Discount must be between 0 and 100.");
-        }
-        discountValue = n;
-      }
-
-      if (!startsAt || !endsAt) {
-        throw new Error("Please set both start date and end date.");
-      }
-
-      // ✅ NEW: Parse maxRedemptions
-      // Empty => null (unlimited)
-      // Positive integer => that limit
-      let maxRedemptions: number | null = null;
-      if (maxRedemptionsRaw) {
-        const n = Number(maxRedemptionsRaw);
-        if (!Number.isInteger(n) || n <= 0) {
-          throw new Error("Max redemptions must be a whole number greater than 0 (or leave empty).");
-        }
-        maxRedemptions = n;
-      }
-
-      // 1) If merchant selected a file, upload it to Supabase Storage
-      if (imageFile) {
-        const supabase = createSupabaseBrowser();
-
-        const fileExt = imageFile.name.split(".").pop() || "jpg";
-        const fileName = `${crypto.randomUUID()}.${fileExt}`;
-        const filePath = `deals/${fileName}`;
-
-        const { error: uploadError } = await supabase.storage
-          .from("deal-images") // bucket name
-          .upload(filePath, imageFile, {
-            cacheControl: "3600",
-            upsert: false,
-          });
-
-        if (uploadError) {
-          console.error("Upload error:", uploadError);
-          throw new Error("Failed to upload image. Please try again.");
-        }
-
-        const {
-          data: { publicUrl },
-        } = supabase.storage.from("deal-images").getPublicUrl(filePath);
-
-        imageUrl = publicUrl;
-      }
-
-      const payload: CreateDealPayload = {
-        title,
-        description,
-        originalPrice,
-        discountValue,
-        startsAt,
-        endsAt,
-        imageUrl,
-        maxRedemptions, // ✅ NEW
-      };
-
-      const res = await fetch("/api/merchant/deals", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-
-      const data = await res.json();
-
-      if (!res.ok) {
-        console.error("Create deal error:", data);
-        throw new Error(data?.error || "Failed to create deal.");
-      }
-
-      router.push("/merchant/deals");
-    } catch (err: any) {
-      console.error(err);
-      setError(err.message || "Something went wrong creating the deal.");
-    } finally {
-      setSubmitting(false);
+  async function uploadImageIfNeeded(): Promise<string | null> {
+    // If file chosen, upload it. If not, use URL field (optional).
+    if (!imageFile) {
+      const url = imageUrl.trim();
+      return url ? url : null;
     }
+
+    const fd = new FormData();
+    fd.append("file", imageFile);
+
+    const res = await fetch("/api/uploads/deal-image", {
+      method: "POST",
+      body: fd,
+    });
+
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(data?.error || data?.details || "Image upload failed");
+    }
+    return data.url as string;
   }
 
-  function handleImageChange(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0];
-    if (!file) {
-      setImageFile(null);
-      setImagePreview(null);
+  async function onSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    setError(null);
+
+    const orig = originalPrice.trim() ? Number(originalPrice) : null;
+    const disc = discountValue.trim() ? Number(discountValue) : 0;
+
+    const max =
+      inventoryMode === "LIMITED" && maxRedemptions.trim()
+        ? Number(maxRedemptions)
+        : null;
+
+    if (inventoryMode === "LIMITED" && (!max || !Number.isFinite(max) || max <= 0)) {
+      setError("For Limited inventory, maxRedemptions must be a number > 0.");
       return;
     }
 
-    setImageFile(file);
+    // Optional: simple date sanity check
+    if (!startDate || startDate.length !== 10) {
+      setError("Valid startDate (YYYY-MM-DD) is required.");
+      return;
+    }
+    if (!endDate || endDate.length !== 10) {
+      setError("Valid endDate (YYYY-MM-DD) is required.");
+      return;
+    }
 
-    const reader = new FileReader();
-    reader.onload = (ev) => {
-      setImagePreview(typeof ev.target?.result === "string" ? ev.target.result : null);
-    };
-    reader.readAsDataURL(file);
+    startTransition(async () => {
+      try {
+        const finalImageUrl = await uploadImageIfNeeded();
+
+        const res = await fetch("/api/merchant/deals/create", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            title,
+            description,
+            originalPrice: orig,
+            discountValue: Number.isFinite(disc) ? disc : 0,
+            discountType: disc > 0 ? "PERCENT" : "NONE",
+            imageUrl: finalImageUrl,
+
+            // ✅ send DATE-ONLY fields (backend will convert to 23:59)
+            startDate,
+            endDate,
+
+            inventoryMode,
+            maxRedemptions: max,
+          }),
+        });
+
+        const data = await res.json().catch(() => ({}));
+
+        if (!res.ok) {
+          throw new Error(data?.error || data?.details || "Failed to create deal.");
+        }
+
+        router.push("/merchant/deals");
+        router.refresh();
+      } catch (err: any) {
+        setError(err?.message || "Something went wrong.");
+      }
+    });
   }
 
   return (
-    <main className="mx-auto flex max-w-4xl flex-col gap-6 px-4 py-10">
-      <header className="mb-2">
-        <p className="text-xs font-semibold uppercase tracking-[0.18em] text-emerald-500">
-          Merchant
-        </p>
-        <h1 className="mt-1 text-2xl font-semibold text-slate-900">Create New Deal</h1>
+    <main className="mx-auto max-w-3xl px-4 py-10">
+      <header className="mb-6">
+        <h1 className="text-3xl font-semibold text-slate-900">Create new deal</h1>
         <p className="mt-1 text-sm text-slate-500">
-          Fill in the details of your promotion. Add a clear photo so customers understand the offer quickly.
+          Date-only: we automatically set start/end to 23:59.
         </p>
       </header>
 
-      <form
-        onSubmit={handleSubmit}
-        className="space-y-6 rounded-3xl border border-slate-200 bg-white p-6 shadow-sm"
-      >
-        {/* Title */}
-        <div className="space-y-1">
-          <label htmlFor="title" className="text-sm font-medium text-slate-900">
-            Title
-          </label>
-          <input
-            id="title"
-            name="title"
-            type="text"
-            required
-            placeholder="e.g. 2-for-1 lunch special"
-            className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-900 focus:border-emerald-500 focus:outline-none focus:ring-1 focus:ring-emerald-500"
-          />
-        </div>
+      <form onSubmit={onSubmit} className="space-y-5">
+        {/* Basic info */}
+        <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+          <div className="grid gap-4">
+            <div>
+              <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
+                Title
+              </label>
+              <input
+                value={title}
+                onChange={(e) => setTitle(e.target.value)}
+                className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm focus:border-emerald-500 focus:outline-none focus:ring-1 focus:ring-emerald-500"
+                required
+              />
+            </div>
 
-        {/* Description */}
-        <div className="space-y-1">
-          <label htmlFor="description" className="text-sm font-medium text-slate-900">
-            Description
-          </label>
-          <textarea
-            id="description"
-            name="description"
-            rows={3}
-            placeholder="Describe what is included in this deal."
-            className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-900 focus:border-emerald-500 focus:outline-none focus:ring-1 focus:ring-emerald-500"
-          />
-        </div>
+            <div>
+              <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
+                Description
+              </label>
+              <textarea
+                value={description}
+                onChange={(e) => setDescription(e.target.value)}
+                className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm focus:border-emerald-500 focus:outline-none focus:ring-1 focus:ring-emerald-500"
+                rows={4}
+                required
+              />
+            </div>
 
-        {/* Pricing row */}
-        <div className="grid gap-4 md:grid-cols-2">
-          <div className="space-y-1">
-            <label htmlFor="originalPrice" className="text-sm font-medium text-slate-900">
-              Original price (₦)
-            </label>
-            <input
-              id="originalPrice"
-              name="originalPrice"
-              type="number"
-              min={0}
-              step="1"
-              placeholder="e.g. 2500"
-              className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-900 focus:border-emerald-500 focus:outline-none focus:ring-1 focus:ring-emerald-500"
-            />
-          </div>
-
-          <div className="space-y-1">
-            <label htmlFor="discountValue" className="text-sm font-medium text-slate-900">
-              Discount (%)
-            </label>
-            <input
-              id="discountValue"
-              name="discountValue"
-              type="number"
-              min={0}
-              max={100}
-              step="1"
-              placeholder="e.g. 25"
-              className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-900 focus:border-emerald-500 focus:outline-none focus:ring-1 focus:ring-emerald-500"
-            />
-          </div>
-        </div>
-
-        {/* ✅ NEW: Max redemptions */}
-        <div className="space-y-1">
-          <label htmlFor="maxRedemptions" className="text-sm font-medium text-slate-900">
-            Max redemptions (optional)
-          </label>
-          <input
-            id="maxRedemptions"
-            name="maxRedemptions"
-            type="number"
-            min={1}
-            step="1"
-            placeholder="Leave empty for unlimited (e.g. 1, 10, 100)"
-            className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-900 focus:border-emerald-500 focus:outline-none focus:ring-1 focus:ring-emerald-500"
-          />
-          <p className="text-[11px] text-slate-500">
-            Use <span className="font-medium">1</span> for “one free item total”, or leave blank for unlimited redemptions.
-          </p>
-        </div>
-
-        {/* Dates row */}
-        <div className="grid gap-4 md:grid-cols-2">
-          <div className="space-y-1">
-            <label htmlFor="startsAt" className="text-sm font-medium text-slate-900">
-              Starts at
-            </label>
-            <input
-              id="startsAt"
-              name="startsAt"
-              type="date"
-              className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-900 focus:border-emerald-500 focus:outline-none focus:ring-1 focus:ring-emerald-500"
-            />
-          </div>
-
-          <div className="space-y-1">
-            <label htmlFor="endsAt" className="text-sm font-medium text-slate-900">
-              Ends at
-            </label>
-            <input
-              id="endsAt"
-              name="endsAt"
-              type="date"
-              className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-900 focus:border-emerald-500 focus:outline-none focus:ring-1 focus:ring-emerald-500"
-            />
-          </div>
-        </div>
-
-        {/* Image upload + optional URL */}
-        <div className="grid gap-4 md:grid-cols-[minmax(0,2fr)_minmax(0,1.5fr)]">
-          <div className="space-y-2">
-            <p className="text-sm font-medium text-slate-900">
-              Deal image <span className="ml-1 text-xs font-normal text-slate-500">(upload from phone)</span>
-            </p>
-
-            <label className="flex cursor-pointer flex-col items-center justify-center rounded-2xl border-2 border-dashed border-slate-200 bg-slate-50 px-4 py-6 text-center text-xs text-slate-500 hover:border-emerald-400 hover:bg-emerald-50/40">
-              {imagePreview ? (
-                // eslint-disable-next-line @next/next/no-img-element
-                <img
-                  src={imagePreview}
-                  alt="Preview"
-                  className="mb-2 h-32 w-full rounded-xl object-cover"
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div>
+                <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
+                  Original price (₦)
+                </label>
+                <input
+                  value={originalPrice}
+                  onChange={(e) => setOriginalPrice(e.target.value)}
+                  inputMode="numeric"
+                  className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm focus:border-emerald-500 focus:outline-none focus:ring-1 focus:ring-emerald-500"
                 />
-              ) : (
-                <span className="mb-1 text-3xl">📷</span>
-              )}
-              <span className="font-medium text-slate-800">Tap to choose photo</span>
-              <span className="mt-1 text-[11px] text-slate-500">JPG or PNG, max ~3MB</span>
-              <input type="file" accept="image/*" className="hidden" onChange={handleImageChange} />
-            </label>
-          </div>
+              </div>
 
-          <div className="space-y-1">
-            <label htmlFor="imageUrl" className="text-sm font-medium text-slate-900">
-              Image URL (optional)
-            </label>
-            <input
-              id="imageUrl"
-              name="imageUrl"
-              type="url"
-              placeholder="Paste a public image URL (optional)"
-              className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-900 focus:border-emerald-500 focus:outline-none focus:ring-1 focus:ring-emerald-500"
-            />
-            <p className="text-[11px] text-slate-500">
-              Most merchants will just upload from their phone. This field is only for special cases where you already have an image URL.
-            </p>
+              <div>
+                <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
+                  Discount % (0–100)
+                </label>
+                <input
+                  value={discountValue}
+                  onChange={(e) => setDiscountValue(e.target.value)}
+                  inputMode="numeric"
+                  className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm focus:border-emerald-500 focus:outline-none focus:ring-1 focus:ring-emerald-500"
+                />
+              </div>
+            </div>
+
+            {/* ✅ Upload image */}
+            <div>
+              <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
+                Upload image (optional)
+              </label>
+              <input
+                type="file"
+                accept="image/*"
+                onChange={(e) => setImageFile(e.target.files?.[0] || null)}
+                className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm"
+              />
+              <p className="mt-1 text-[11px] text-slate-500">
+                If you upload a file, we’ll store it in Supabase Storage and save the URL automatically.
+              </p>
+            </div>
+
+            {/* Optional URL fallback */}
+            <div>
+              <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
+                Image URL (optional fallback)
+              </label>
+              <input
+                value={imageUrl}
+                onChange={(e) => setImageUrl(e.target.value)}
+                className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm focus:border-emerald-500 focus:outline-none focus:ring-1 focus:ring-emerald-500"
+                placeholder="https://..."
+              />
+            </div>
           </div>
-        </div>
+        </section>
+
+        {/* ✅ Date-only timing */}
+        <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+          <h2 className="text-sm font-semibold text-slate-900">Timing</h2>
+
+          <div className="mt-3 grid gap-3 sm:grid-cols-2">
+            <div>
+              <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
+                Starts on
+              </label>
+              <input
+                type="date"
+                value={startDate}
+                onChange={(e) => setStartDate(e.target.value)}
+                className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm focus:border-emerald-500 focus:outline-none focus:ring-1 focus:ring-emerald-500"
+                required
+              />
+              <p className="mt-1 text-[11px] text-slate-500">
+                We assume 23:59 for the start time.
+              </p>
+            </div>
+
+            <div>
+              <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">
+                Ends on
+              </label>
+              <input
+                type="date"
+                value={endDate}
+                onChange={(e) => setEndDate(e.target.value)}
+                className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm focus:border-emerald-500 focus:outline-none focus:ring-1 focus:ring-emerald-500"
+                required
+              />
+              <p className="mt-1 text-[11px] text-slate-500">
+                We assume 23:59 for the end time.
+              </p>
+            </div>
+          </div>
+        </section>
+
+        {/* Inventory */}
+        <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+          <h2 className="text-sm font-semibold text-slate-900">Inventory</h2>
+          <p className="mt-1 text-xs text-slate-500">
+            Decide how many total redemptions are allowed for this deal.
+          </p>
+
+          <div className="mt-3 grid gap-2">
+            <label className="flex cursor-pointer items-center gap-3 rounded-xl border border-slate-200 p-3">
+              <input
+                type="radio"
+                name="inventory"
+                checked={inventoryMode === "UNLIMITED"}
+                onChange={() => setInventoryMode("UNLIMITED")}
+              />
+              <div>
+                <div className="text-sm font-semibold text-slate-900">Unlimited</div>
+                <div className="text-xs text-slate-500">No limit until the deal expires.</div>
+              </div>
+            </label>
+
+            <label className="flex cursor-pointer items-center gap-3 rounded-xl border border-slate-200 p-3">
+              <input
+                type="radio"
+                name="inventory"
+                checked={inventoryMode === "ONE"}
+                onChange={() => setInventoryMode("ONE")}
+              />
+              <div>
+                <div className="text-sm font-semibold text-slate-900">One only</div>
+                <div className="text-xs text-slate-500">Exactly 1 total redemption.</div>
+              </div>
+            </label>
+
+            <label className="flex cursor-pointer items-start gap-3 rounded-xl border border-slate-200 p-3">
+              <input
+                type="radio"
+                name="inventory"
+                checked={inventoryMode === "LIMITED"}
+                onChange={() => setInventoryMode("LIMITED")}
+                className="mt-1"
+              />
+              <div className="w-full">
+                <div className="text-sm font-semibold text-slate-900">Limited</div>
+                <div className="text-xs text-slate-500">Set total redemptions (e.g. 100).</div>
+
+                <div className="mt-2">
+                  <input
+                    value={maxRedemptions}
+                    onChange={(e) => setMaxRedemptions(e.target.value)}
+                    disabled={inventoryMode !== "LIMITED"}
+                    inputMode="numeric"
+                    className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm disabled:opacity-60 focus:border-emerald-500 focus:outline-none focus:ring-1 focus:ring-emerald-500"
+                    placeholder="e.g. 100"
+                  />
+                </div>
+              </div>
+            </label>
+
+            <div className="mt-1 rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-800">
+              {computedPreview}
+            </div>
+          </div>
+        </section>
 
         {error && (
-          <div className="rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
+          <div className="rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800">
             {error}
           </div>
         )}
 
-        <div className="flex items-center justify-between pt-2">
-          <p className="text-[11px] text-slate-500">
-            You can edit this deal later from{" "}
-            <span className="font-medium text-slate-700">Merchant home</span>.
-          </p>
-
+        <div className="flex items-center gap-2">
           <button
             type="submit"
-            disabled={submitting}
+            disabled={isPending}
             className="rounded-full bg-emerald-600 px-5 py-2 text-sm font-semibold text-white shadow-sm hover:bg-emerald-700 disabled:opacity-60"
           >
-            {submitting ? "Creating..." : "Create deal"}
+            {isPending ? "Creating..." : "Create deal"}
+          </button>
+
+          <button
+            type="button"
+            onClick={() => router.push("/merchant/deals")}
+            disabled={isPending}
+            className="rounded-full border border-slate-200 px-5 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-60"
+          >
+            Cancel
           </button>
         </div>
       </form>

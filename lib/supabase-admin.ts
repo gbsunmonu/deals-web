@@ -1,22 +1,15 @@
 // lib/supabase-admin.ts
 import { createClient } from "@supabase/supabase-js";
 
-// Use the core Supabase URL and a SERVICE ROLE key (admin privileges)
-const supabaseAdminUrl = process.env.SUPABASE_URL;
-const supabaseServiceRoleKey =
-  process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SERVICE_KEY;
+const supabaseUrl =
+  process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL;
 
-if (!supabaseAdminUrl || !supabaseServiceRoleKey) {
-  throw new Error(
-    "Missing Supabase admin environment variables. Please set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY (or SUPABASE_SERVICE_KEY)."
-  );
-}
+const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
-export const supabaseAdmin = createClient(supabaseAdminUrl, supabaseServiceRoleKey, {
-  auth: {
-    persistSession: false,
-  },
+if (!supabaseUrl) throw new Error("Missing SUPABASE_URL / NEXT_PUBLIC_SUPABASE_URL");
+if (!serviceRoleKey) throw new Error("Missing SUPABASE_SERVICE_ROLE_KEY");
+
+// Admin client (service role) — do NOT use in client components.
+export const supabaseAdmin = createClient(supabaseUrl, serviceRoleKey, {
+  auth: { persistSession: false },
 });
-
-// Optional default export, in case something imports it as default
-export default supabaseAdmin;
