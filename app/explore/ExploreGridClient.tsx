@@ -20,8 +20,49 @@ type DealRow = {
 
 type AvailabilityMap = Record<string, AvailabilityRow>;
 
+function clampPct(n: number) {
+  if (!Number.isFinite(n)) return 0;
+  return Math.max(0, Math.min(100, Math.round(n)));
+}
+
+function computeSaveAmount(deal: DealRow) {
+  const discountValue = clampPct(Number(deal.discountValue ?? 0));
+  const originalPrice = typeof deal.originalPrice === "number" ? deal.originalPrice : null;
+  const isPercent = deal.discountType === "PERCENT" || deal.discountType === "PERCENTAGE";
+
+  if (!originalPrice || discountValue <= 0 || !isPercent) return null;
+  return Math.round((originalPrice * discountValue) / 100);
+}
+
+function hotScore(deal: DealRow) {
+  const discountValue = clampPct(Number(deal.discountValue ?? 0));
+  const saveAmount = computeSaveAmount(deal);
+
+  const isHot = (saveAmount != null && saveAmount >= 1000) || discountValue >= 45;
+  if (!isHot) return 0;
+
+  // higher score => earlier in list
+  // prioritize huge savings, then high %.
+  return (saveAmount ?? 0) + discountValue * 50;
+}
+
 export default function ExploreGridClient({ deals }: { deals: DealRow[] }) {
-  const ids = useMemo(() => deals.map((d) => d.id), [deals]);
+  // ✅ Sort HOT deals first (client-side)
+  const sortedDeals = useMemo(() => {
+    const arr = [...deals];
+    arr.sort((a, b) => {
+      const hs = hotScore(b) - hotScore(a);
+      if (hs !== 0) return hs;
+
+      // fallback: newest first (startsAt desc)
+      const aS = new Date(a.startsAt as any).getTime();
+      const bS = new Date(b.startsAt as any).getTime();
+      return bS - aS;
+    });
+    return arr;
+  }, [deals]);
+
+  const ids = useMemo(() => sortedDeals.map((d) => d.id), [sortedDeals]);
 
   const [map, setMap] = useState<AvailabilityMap>({});
   const [pulseKey, setPulseKey] = useState<Record<string, number>>({});
@@ -69,7 +110,7 @@ export default function ExploreGridClient({ deals }: { deals: DealRow[] }) {
   useEffect(() => {
     fetchAvailability();
     if (timerRef.current) clearInterval(timerRef.current);
-    timerRef.current = setInterval(fetchAvailability, 5000);
+    timerRef.current = setInterval(fetchAvailability, 5000); // ✅ polling interval
     return () => {
       if (timerRef.current) clearInterval(timerRef.current);
       timerRef.current = null;
@@ -79,14 +120,14 @@ export default function ExploreGridClient({ deals }: { deals: DealRow[] }) {
 
   return (
     <section aria-label="Live deals">
-      {deals.length === 0 ? (
+      {sortedDeals.length === 0 ? (
         <div className="rounded-2xl border border-dashed border-slate-200 bg-slate-50 px-4 py-10 text-center text-sm text-slate-500">
           No deals match your search yet. Try clearing filters or checking back later.
         </div>
       ) : (
         <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-          {deals.map((deal) => {
-            const availability = map[deal.id];
+          {sortedDeals.map((deal) => {
+            const availability = map[deal.id]; // can be undefined at first load
 
             return (
               <DealCard

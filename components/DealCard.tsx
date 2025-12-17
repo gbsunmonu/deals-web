@@ -12,6 +12,7 @@ function fmtRange(startsAt: string | Date, endsAt: string | Date) {
   const s = typeof startsAt === "string" ? new Date(startsAt) : startsAt;
   const e = typeof endsAt === "string" ? new Date(endsAt) : endsAt;
 
+  // Same month → "15–31 Dec"
   if (s.getFullYear() === e.getFullYear() && s.getMonth() === e.getMonth()) {
     const dd1 = String(s.getDate()).padStart(2, "0");
     const dd2 = String(e.getDate()).padStart(2, "0");
@@ -19,6 +20,7 @@ function fmtRange(startsAt: string | Date, endsAt: string | Date) {
     return `Valid ${dd1}–${dd2} ${mon}`;
   }
 
+  // Different months → "15 Dec – 03 Jan"
   return `Valid ${fmtDayMonth(s)} – ${fmtDayMonth(e)}`;
 }
 
@@ -31,23 +33,21 @@ function clampPct(n: number) {
   return Math.max(0, Math.min(100, Math.round(n)));
 }
 
-function isPercent(discountType: any) {
-  return discountType === "PERCENT" || discountType === "PERCENTAGE";
+function isSameLocalDay(a: Date, b: Date) {
+  return (
+    a.getFullYear() === b.getFullYear() &&
+    a.getMonth() === b.getMonth() &&
+    a.getDate() === b.getDate()
+  );
 }
 
-function urgencyLabel(endsAt: string | Date) {
-  const end = typeof endsAt === "string" ? new Date(endsAt) : endsAt;
-  const ms = end.getTime() - Date.now();
-  if (!Number.isFinite(ms)) return null;
-  if (ms <= 0) return "Ended";
-
-  const hours = Math.floor(ms / (1000 * 60 * 60));
-  const mins = Math.floor((ms % (1000 * 60 * 60)) / (1000 * 60));
-
-  if (hours < 1) return `Ends in ${Math.max(1, mins)}m`;
-  if (hours < 6) return `Ends in ${hours}h`;
-  if (hours < 24) return "Ending today";
-  return null;
+function formatEndsIn(msLeft: number) {
+  const mins = Math.max(0, Math.floor(msLeft / 60000));
+  if (mins < 60) return `Ends in ${mins}m`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `Ends in ${hrs}h`;
+  const days = Math.floor(hrs / 24);
+  return `Ends in ${days}d`;
 }
 
 export default function DealCard({
@@ -70,57 +70,69 @@ export default function DealCard({
 
   const discountValue = clampPct(Number(deal.discountValue ?? 0));
   const originalPrice = typeof deal.originalPrice === "number" ? deal.originalPrice : null;
+  const isPercent = deal.discountType === "PERCENT" || deal.discountType === "PERCENTAGE";
 
   const saveAmount =
-    originalPrice && discountValue > 0 && isPercent(deal.discountType)
+    originalPrice && discountValue > 0 && isPercent
       ? Math.round((originalPrice * discountValue) / 100)
       : null;
 
-  // ✅ HOT DEAL: save >= ₦1000 OR discount >= 45%
+  // ✅ HOT DEAL RULE: save >= ₦1000 OR discount >= 45%
   const isHotDeal = (saveAmount != null && saveAmount >= 1000) || discountValue >= 45;
 
-  const validLabel = fmtRange(deal.startsAt, deal.endsAt);
-  const urgency = !soldOut ? urgencyLabel(deal.endsAt) : null;
+  // ✅ Urgency badge
+  const endsAt = new Date(deal.endsAt);
+  const now = new Date();
+  const msLeft = endsAt.getTime() - now.getTime();
+  const isEndingToday = msLeft > 0 && isSameLocalDay(endsAt, now);
 
-  const m = merchant ?? deal.merchant; // ✅ safe fallback
+  const urgencyLabel =
+    msLeft <= 0
+      ? null
+      : msLeft <= 6 * 60 * 60 * 1000
+        ? formatEndsIn(msLeft)
+        : isEndingToday
+          ? "Ending today"
+          : null;
+
+  const veryUrgent = msLeft > 0 && msLeft <= 60 * 60 * 1000; // <= 1 hour
+
+  const validLabel = fmtRange(deal.startsAt, deal.endsAt);
   const href = `/deals/${deal.id}`;
 
   const CardInner = (
     <article
       className={[
         "overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm transition",
-        soldOut ? "opacity-95" : "hover:shadow-md",
+        soldOut ? "opacity-95" : "hover:shadow-md hover:-translate-y-[1px]",
       ].join(" ")}
     >
       <div className="relative">
         {deal.imageUrl ? (
           // eslint-disable-next-line @next/next/no-img-element
-          <img src={deal.imageUrl} alt={deal.title} className="h-48 w-full object-cover" loading="lazy" />
+          <img
+            src={deal.imageUrl}
+            alt={deal.title}
+            className="h-48 w-full object-cover"
+            loading="lazy"
+          />
         ) : (
           <div className="h-48 w-full bg-slate-100" />
         )}
 
+        {/* Availability */}
         <div className="absolute left-3 top-3">
           <AvailabilityBadge row={availability} pulseKey={availabilityPulseKey} />
         </div>
 
-        {/* ✅ urgency */}
-        {urgency && urgency !== "Ended" && (
-          <div className="absolute left-3 bottom-3">
-            <span className="inline-flex items-center rounded-full bg-black/70 px-3 py-1 text-[11px] font-semibold text-white">
-              {urgency}
-            </span>
-          </div>
-        )}
-
-        {/* ✅ HOT DEAL flame (bigger + animated) */}
+        {/* ✅ HOT DEAL flame (bigger) */}
         {isHotDeal && !soldOut && (
           <div className="absolute right-3 top-3">
             <span
               className={[
                 "inline-flex items-center gap-2 rounded-full px-3 py-1 text-[11px] font-semibold",
                 "bg-red-600 text-white shadow-sm",
-                "animate-[pulse_1.1s_ease-in-out_infinite]",
+                "animate-[pulse_1.2s_ease-in-out_infinite]",
               ].join(" ")}
               title="Hot deal"
             >
@@ -130,30 +142,54 @@ export default function DealCard({
           </div>
         )}
 
+        {/* ✅ Urgency badge */}
+        {urgencyLabel && !soldOut && (
+          <div className="absolute left-3 bottom-3">
+            <span
+              className={[
+                "inline-flex items-center gap-2 rounded-full px-3 py-1 text-[11px] font-semibold shadow-sm",
+                veryUrgent ? "bg-amber-500 text-white" : "bg-slate-900/80 text-white",
+                veryUrgent ? "animate-[pulse_0.9s_ease-in-out_infinite]" : "",
+              ].join(" ")}
+            >
+              ⏱ {urgencyLabel}
+            </span>
+          </div>
+        )}
+
         {soldOut && <div className="absolute inset-0 bg-white/65 backdrop-blur-[1px]" />}
       </div>
 
       <div className="p-4">
         <div className="text-xs text-slate-600">
-          {m?.name ? <span className="font-semibold text-slate-800">{m.name}</span> : <span className="text-slate-500">Merchant</span>}
-          {m?.city ? <span className="text-slate-400"> · {m.city}</span> : null}
+          {merchant?.name ? (
+            <span className="font-semibold text-slate-800">{merchant.name}</span>
+          ) : (
+            <span className="text-slate-500">Merchant</span>
+          )}
+          {merchant?.city ? <span className="text-slate-400"> · {merchant.city}</span> : null}
         </div>
 
-        <h3 className="mt-1 text-base font-semibold text-slate-900 line-clamp-2">{deal.title}</h3>
+        <h3 className="mt-1 text-base font-semibold text-slate-900 line-clamp-2">
+          {deal.title}
+        </h3>
 
         <div className="mt-3 rounded-2xl bg-emerald-50/70 p-4">
           <div className="flex items-start justify-between gap-4">
             <div>
-              <p className="text-[11px] font-semibold uppercase tracking-wide text-emerald-900/70">You save</p>
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-emerald-900/70">
+                You save
+              </p>
 
-              {/* ✅ “Save ₦2,500” look */}
+              {/* ✅ “Save ₦2,500” */}
               <p className="mt-1 text-3xl font-semibold text-emerald-900">
                 {saveAmount != null ? formatMoneyNGN(saveAmount) : "—"}
               </p>
 
               {originalPrice && saveAmount != null ? (
                 <p className="mt-1 text-sm text-emerald-900/70">
-                  Pay {formatMoneyNGN(originalPrice - saveAmount)} instead of {formatMoneyNGN(originalPrice)}.
+                  Pay {formatMoneyNGN(originalPrice - saveAmount)} instead of{" "}
+                  {formatMoneyNGN(originalPrice)}.
                 </p>
               ) : (
                 <p className="mt-1 text-sm text-emerald-900/60">Limited-time discount.</p>
@@ -161,8 +197,12 @@ export default function DealCard({
             </div>
 
             <div className="text-right">
-              <p className="text-[11px] font-semibold uppercase tracking-wide text-emerald-900/70">Discount</p>
-              <p className="mt-1 text-2xl font-semibold text-emerald-900">{discountValue > 0 ? `${discountValue}% off` : "—"}</p>
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-emerald-900/70">
+                Discount
+              </p>
+              <p className="mt-1 text-2xl font-semibold text-emerald-900">
+                {discountValue > 0 ? `${discountValue}% off` : "—"}
+              </p>
             </div>
           </div>
 
@@ -172,18 +212,23 @@ export default function DealCard({
 
               {!unlimited && typeof left === "number" && typeof max === "number" ? (
                 <div className="mt-1 text-xs text-emerald-900/60">
-                  {redeemedCount.toLocaleString("en-NG")} redeemed · {left.toLocaleString("en-NG")} remaining
+                  {redeemedCount.toLocaleString("en-NG")} redeemed ·{" "}
+                  {left.toLocaleString("en-NG")} remaining
                 </div>
               ) : (
-                <div className="mt-1 text-xs text-emerald-900/50">{redeemedCount.toLocaleString("en-NG")} redeemed</div>
+                <div className="mt-1 text-xs text-emerald-900/50">
+                  {redeemedCount.toLocaleString("en-NG")} redeemed {unlimited ? "· Unlimited" : ""}
+                </div>
               )}
             </div>
 
-            {/* ✅ CTA */}
+            {/* ✅ CTA copy */}
             <span
               className={[
                 "inline-flex items-center justify-center rounded-full px-5 py-2 text-sm font-semibold shadow-sm transition",
-                soldOut ? "bg-slate-200 text-slate-500" : "bg-emerald-600 text-white hover:bg-emerald-700 active:scale-[0.99]",
+                soldOut
+                  ? "bg-slate-200 text-slate-500"
+                  : "bg-emerald-600 text-white hover:bg-emerald-700 active:scale-[0.99]",
               ].join(" ")}
             >
               {soldOut ? "Sold out" : "Claim deal →"}
@@ -194,6 +239,7 @@ export default function DealCard({
     </article>
   );
 
+  // Sold out = non-clickable
   if (soldOut) return <div>{CardInner}</div>;
 
   return (
