@@ -4,7 +4,8 @@ import type { Prisma } from "@prisma/client";
 import crypto from "crypto";
 
 const QR_TTL_MINUTES = 15;
-const COOLDOWN_SECONDS = 20; // ✅ per-device cooldown between NEW QR generations
+const COOLDOWN_SECONDS = 20; // per-device cooldown between NEW QR generations
+const DAILY_DEVICE_CAP = 10; // ✅ max NEW QRs per device per 24h (tune this)
 
 function sha256(input: string) {
   return crypto.createHash("sha256").update(input).digest("hex");
@@ -67,12 +68,11 @@ async function lockDealAndCheckSoldOut(
 
   const deal = rows[0];
 
-  // Only allow claim while deal is live
   if (deal.startsAt > now) return { ok: false, status: 409, error: "Deal has not started yet" };
   if (deal.endsAt < now) return { ok: false, status: 409, error: "Deal has ended" };
 
   const max = deal.maxRedemptions;
-  if (typeof max !== "number" || max <= 0) return { ok: true }; // unlimited
+  if (typeof max !== "number" || max <= 0) return { ok: true };
 
   const redeemedCount = await tx.redemption.count({
     where: { dealId, redeemedAt: { not: null } },
@@ -99,32 +99,23 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
 
     const result = await withTxnRetry(async () => {
       return prisma.$transaction(async (tx) => {
-        // ✅ ensure deal is live + not sold out
         const gate = await lockDealAndCheckSoldOut(tx, dealId);
         if (!gate.ok) return { kind: "ERR" as const, status: gate.status, error: gate.error };
 
         const now = new Date();
 
-        // ✅ 1) Reuse active QR if it exists & still valid
+        // ✅ 1) Reuse active QR if it exists & still valid (NO daily cap hit)
         const existing = await tx.redemption.findFirst({
           where: { activeKey },
-          select: {
-            id: true,
-            shortCode: true,
-            code: true,
-            redeemedAt: true,
-            expiresAt: true, // may be nullable in YOUR DB right now, so we guard
-          },
+          select: { id: true, shortCode: true, redeemedAt: true, expiresAt: true },
         });
 
         if (existing) {
           const exp = existing.expiresAt ? new Date(existing.expiresAt) : null;
 
-          // If already redeemed → unlock
           if (existing.redeemedAt) {
             await tx.redemption.update({ where: { id: existing.id }, data: { activeKey: null } });
           } else if (exp && exp > now) {
-            // ✅ still valid → reuse
             return {
               kind: "OK" as const,
               redemptionId: existing.id,
@@ -133,12 +124,11 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
               reused: true,
             };
           } else {
-            // expired OR expiresAt missing → unlock
             await tx.redemption.update({ where: { id: existing.id }, data: { activeKey: null } });
           }
         }
 
-        // ✅ 2) Per-device cooldown (only applies when generating a NEW QR)
+        // ✅ 2) Per-device cooldown (only for NEW QR)
         const latest = await tx.redemption.findFirst({
           where: { dealId, deviceHash },
           orderBy: { createdAt: "desc" },
@@ -156,11 +146,46 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
               status: 429,
               error: `Please wait ${retryAfterSec}s before generating a new QR.`,
               retryAfterSec,
+              cooldownSeconds: retryAfterSec,
             };
           }
         }
 
-        // ✅ 3) Create new QR (locked to this device+deal for 15 minutes)
+        // ✅ 3) Daily per-device cap (rolling 24 hours) — only for NEW QR
+        const windowStart = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+
+        const usedInWindow = await tx.redemption.count({
+          where: {
+            deviceHash,
+            dealId,
+            createdAt: { gte: windowStart },
+          },
+        });
+
+        if (usedInWindow >= DAILY_DEVICE_CAP) {
+          // Find earliest in window to compute retry time (nice UX)
+          const first = await tx.redemption.findFirst({
+            where: { deviceHash, dealId, createdAt: { gte: windowStart } },
+            orderBy: { createdAt: "asc" },
+            select: { createdAt: true },
+          });
+
+          const resetAt = first ? new Date(new Date(first.createdAt).getTime() + 24 * 60 * 60 * 1000) : null;
+          const retryAfterSec =
+            resetAt && resetAt.getTime() > now.getTime()
+              ? Math.ceil((resetAt.getTime() - now.getTime()) / 1000)
+              : 60;
+
+          return {
+            kind: "ERR" as const,
+            status: 429,
+            error: `Daily limit reached for this device. Try again later.`,
+            retryAfterSec,
+            dailyLimitSeconds: retryAfterSec,
+          };
+        }
+
+        // ✅ 4) Create new QR
         const shortCode = await generateUniqueShortCode(tx);
         const expiresAt = new Date(Date.now() + QR_TTL_MINUTES * 60 * 1000);
 
@@ -168,9 +193,9 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
           data: {
             dealId,
             shortCode,
-            code: shortCode, // confirm route accepts shortCode OR code
+            code: shortCode,
             redeemedAt: null,
-            expiresAt, // required, but DB might allow null; we still set it
+            expiresAt,
             deviceHash,
             activeKey,
           },
@@ -181,7 +206,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
           kind: "OK" as const,
           redemptionId: created.id,
           shortCode: created.shortCode,
-          expiresAt: expiresAt.toISOString(), // ✅ use local expiresAt (never null)
+          expiresAt: expiresAt.toISOString(),
           reused: false,
         };
       });
@@ -190,7 +215,17 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
     if (result.kind === "ERR") {
       const headers: Record<string, string> = {};
       if ((result as any).retryAfterSec) headers["Retry-After"] = String((result as any).retryAfterSec);
-      return NextResponse.json({ ok: false, error: result.error }, { status: result.status, headers });
+
+      return NextResponse.json(
+        {
+          ok: false,
+          error: result.error,
+          cooldownSeconds: (result as any).cooldownSeconds,
+          dailyLimitSeconds: (result as any).dailyLimitSeconds,
+          retryAfterSeconds: (result as any).retryAfterSec,
+        },
+        { status: result.status, headers }
+      );
     }
 
     return NextResponse.json(
