@@ -32,7 +32,11 @@ function clampPct(n: number) {
 }
 
 function isSameLocalDay(a: Date, b: Date) {
-  return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+  return (
+    a.getFullYear() === b.getFullYear() &&
+    a.getMonth() === b.getMonth() &&
+    a.getDate() === b.getDate()
+  );
 }
 
 function formatEndsIn(msLeft: number) {
@@ -44,38 +48,17 @@ function formatEndsIn(msLeft: number) {
   return `Ends in ${days}d`;
 }
 
-type DealCardDeal = {
-  id: string;
-  title: string;
-  description?: string | null;
-  originalPrice: number | null;
-  discountValue: number;
-  discountType: string;
-  startsAt: string | Date;
-  endsAt: string | Date;
-  imageUrl: string | null;
-  maxRedemptions: number | null;
-};
-
-type DealCardMerchant = {
-  id: string;
-  name: string;
-  city?: string | null;
-};
-
-type Props = {
-  deal: DealCardDeal;
-  merchant?: DealCardMerchant;
-  availability?: AvailabilityRow;
-  availabilityPulseKey?: number;
-};
-
 export default function DealCard({
   deal,
   merchant,
   availability,
   availabilityPulseKey = 0,
-}: Props) {
+}: {
+  deal: any;
+  merchant?: { id: string; name: string; city?: string | null };
+  availability?: AvailabilityRow;
+  availabilityPulseKey?: number;
+}) {
   const soldOut = availability?.soldOut ?? false;
   const unlimited = availability?.maxRedemptions == null;
   const left = availability?.left ?? null;
@@ -84,19 +67,23 @@ export default function DealCard({
   const max = availability?.maxRedemptions ?? deal.maxRedemptions ?? null;
 
   const discountValue = clampPct(Number(deal.discountValue ?? 0));
-  const originalPrice = typeof deal.originalPrice === "number" ? deal.originalPrice : null;
-  const isPercent = deal.discountType === "PERCENT" || deal.discountType === "PERCENTAGE";
+  const originalPrice =
+    typeof deal.originalPrice === "number" ? deal.originalPrice : null;
+
+  const isPercent =
+    deal.discountType === "PERCENT" || deal.discountType === "PERCENTAGE";
 
   const saveAmount =
     originalPrice && discountValue > 0 && isPercent
       ? Math.round((originalPrice * discountValue) / 100)
       : null;
 
-  // 🔥 Hot deal rule: save >= ₦1000 OR discount >= 45%
-  const isHotDeal = (saveAmount != null && saveAmount >= 1000) || discountValue >= 45;
+  // ✅ HOT DEAL RULE: save >= ₦1000 OR discount >= 45%
+  const isHotDeal =
+    (saveAmount != null && saveAmount >= 1000) || discountValue >= 45;
 
-  // ⏱ Urgency badge
-  const endsAt = new Date(deal.endsAt as any);
+  // ✅ Urgency badge
+  const endsAt = new Date(deal.endsAt);
   const now = new Date();
   const msLeft = endsAt.getTime() - now.getTime();
   const isEndingToday = msLeft > 0 && isSameLocalDay(endsAt, now);
@@ -104,12 +91,12 @@ export default function DealCard({
     msLeft <= 0
       ? null
       : msLeft <= 6 * 60 * 60 * 1000
-        ? formatEndsIn(msLeft)
-        : isEndingToday
-          ? "Ending today"
-          : null;
+      ? formatEndsIn(msLeft)
+      : isEndingToday
+      ? "Ending today"
+      : null;
 
-  const veryUrgent = msLeft > 0 && msLeft <= 60 * 60 * 1000;
+  const veryUrgent = msLeft > 0 && msLeft <= 60 * 60 * 1000; // <= 1 hour
 
   const validLabel = fmtRange(deal.startsAt, deal.endsAt);
   const href = `/deals/${deal.id}`;
@@ -181,7 +168,9 @@ export default function DealCard({
           {merchant?.city ? <span className="text-slate-400"> · {merchant.city}</span> : null}
         </div>
 
-        <h3 className="mt-1 text-base font-semibold text-slate-900 line-clamp-2">{deal.title}</h3>
+        <h3 className="mt-1 text-base font-semibold text-slate-900 line-clamp-2">
+          {deal.title}
+        </h3>
 
         <div className="mt-3 rounded-2xl bg-emerald-50/70 p-4">
           <div className="flex items-start justify-between gap-4">
@@ -189,14 +178,14 @@ export default function DealCard({
               <p className="text-[11px] font-semibold uppercase tracking-wide text-emerald-900/70">
                 You save
               </p>
-
               <p className="mt-1 text-3xl font-semibold text-emerald-900">
                 {saveAmount != null ? formatMoneyNGN(saveAmount) : "—"}
               </p>
 
               {originalPrice && saveAmount != null ? (
                 <p className="mt-1 text-sm text-emerald-900/70">
-                  Pay {formatMoneyNGN(originalPrice - saveAmount)} instead of {formatMoneyNGN(originalPrice)}.
+                  Pay {formatMoneyNGN(originalPrice - saveAmount)} instead of{" "}
+                  {formatMoneyNGN(originalPrice)}.
                 </p>
               ) : (
                 <p className="mt-1 text-sm text-emerald-900/60">Limited-time discount.</p>
@@ -219,7 +208,8 @@ export default function DealCard({
 
               {!unlimited && typeof left === "number" && typeof max === "number" ? (
                 <div className="mt-1 text-xs text-emerald-900/60">
-                  {redeemedCount.toLocaleString("en-NG")} redeemed · {left.toLocaleString("en-NG")} remaining
+                  {redeemedCount.toLocaleString("en-NG")} redeemed ·{" "}
+                  {left.toLocaleString("en-NG")} remaining
                 </div>
               ) : (
                 <div className="mt-1 text-xs text-emerald-900/50">

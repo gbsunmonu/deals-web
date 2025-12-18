@@ -1,18 +1,18 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import DealCard from "@/components/DealCard";
+import DealCard from "@/components/DealCard"; // ✅ must point to components/DealCard.tsx
 import type { AvailabilityRow } from "@/components/AvailabilityBadge";
 
 type DealRow = {
   id: string;
   title: string;
-  description?: string | null;
+  description: string | null;
   originalPrice: number | null;
   discountValue: number;
   discountType: string;
-  startsAt: string | Date;
-  endsAt: string | Date;
+  startsAt: Date | string;
+  endsAt: Date | string;
   imageUrl: string | null;
   maxRedemptions: number | null;
   merchant: { id: string; name: string; city: string | null };
@@ -68,10 +68,8 @@ export default function ExploreClient({ deals }: { deals: DealRow[] }) {
 
   useEffect(() => {
     fetchAvailability();
-
     if (timerRef.current) clearInterval(timerRef.current);
     timerRef.current = setInterval(fetchAvailability, 5000);
-
     return () => {
       if (timerRef.current) clearInterval(timerRef.current);
       timerRef.current = null;
