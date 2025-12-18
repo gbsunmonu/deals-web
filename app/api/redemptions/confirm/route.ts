@@ -7,10 +7,6 @@ type LegacyDealQrPayload = {
   expiresAt?: string;
 };
 
-function makeShortCode(len = 6) {
-  return Math.random().toString(36).substring(2, 2 + len).toUpperCase();
-}
-
 function isUuid(v: string) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v);
 }
@@ -154,63 +150,6 @@ async function redeemByCodeAtomic(scannedCode: string) {
   };
 }
 
-/**
- * ✅ Legacy JSON payload flow:
- * Instead of creating a Redemption inside an interactive transaction,
- * we create a normal Redemption code (shortCode) and redeem via atomic flow above.
- *
- * This keeps legacy working but avoids Vercel 5s interactive tx timeout.
- */
-async function redeemLegacyPayloadAtomic(legacy: LegacyDealQrPayload) {
-  const now = new Date();
-
-  if (!legacy.dealId || !isUuid(legacy.dealId)) {
-    return { kind: "BAD" as const, error: "Invalid deal id" };
-  }
-
-  if (legacy.expiresAt) {
-    const exp = new Date(legacy.expiresAt);
-    if (Number.isNaN(exp.getTime())) {
-      return { kind: "BAD" as const, error: "QR expiry is invalid" };
-    }
-    if (exp <= now) {
-      return { kind: "EXPIRED" as const };
-    }
-  }
-
-  // Create a one-time shortCode redemption record quickly (no transaction)
-  // Then redeem it using atomic redeem logic to enforce capacity + expiry.
-  // If shortCode collision happens (rare), retry a few times.
-  for (let attempt = 0; attempt < 5; attempt++) {
-    const shortCode = attempt < 4 ? makeShortCode(6) : makeShortCode(8);
-    try {
-      await prisma.redemption.create({
-        data: {
-          dealId: legacy.dealId,
-          shortCode,
-          code: shortCode,
-          redeemedAt: null,
-          createdAt: now,
-          expiresAt: new Date(Date.now() + 15 * 60 * 1000),
-          deviceHash: "legacy",
-          activeKey: null,
-        } as any,
-        select: { id: true },
-      });
-
-      // Now redeem it (same rules as normal flow)
-      const out = await redeemByCodeAtomic(shortCode);
-      return out;
-    } catch (e: any) {
-      // Prisma unique violation = try again
-      if (e?.code === "P2002") continue;
-      throw e;
-    }
-  }
-
-  return { kind: "CONFLICT" as const };
-}
-
 export async function POST(req: NextRequest) {
   try {
     const bodyText = await req.text();
@@ -239,7 +178,11 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "QR code is empty" }, { status: 400 });
     }
 
-    // Legacy JSON
+    // ============================
+    // ✅ OPTION A (BEST + SAFEST)
+    // Legacy JSON payloads are NOT redeemable.
+    // They were allowing repeat redemption by creating new rows each scan.
+    // ============================
     if (scanned.startsWith("{") && scanned.endsWith("}")) {
       let legacy: LegacyDealQrPayload;
       try {
@@ -248,43 +191,18 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ error: "QR code is not a valid deal code" }, { status: 400 });
       }
 
-      if (legacy.type !== "DEAL" || !legacy.dealId) {
+      if (legacy.type !== "DEAL" || !legacy.dealId || !isUuid(legacy.dealId)) {
         return NextResponse.json({ error: "QR code is not a valid deal code" }, { status: 400 });
       }
 
-      const out = await redeemLegacyPayloadAtomic(legacy);
-
-      if (out.kind === "BAD") {
-        return NextResponse.json({ ok: false, status: "BAD_QR", error: out.error }, { status: 400 });
-      }
-      if (out.kind === "NOT_FOUND") {
-        return NextResponse.json({ error: "Redemption code not found" }, { status: 404 });
-      }
-      if (out.kind === "EXPIRED") {
-        return NextResponse.json({ ok: false, status: "EXPIRED", error: "This QR code has expired." }, { status: 410 });
-      }
-      if (out.kind === "ALREADY_REDEEMED") {
-        return NextResponse.json(
-          { ok: false, status: "ALREADY_REDEEMED", error: "This QR code has already been redeemed.", redeemedAt: out.redeemedAt },
-          { status: 409 }
-        );
-      }
-      if (out.kind === "SOLD_OUT") {
-        return NextResponse.json({ ok: false, status: "SOLD_OUT", error: "This deal has been fully redeemed." }, { status: 409 });
-      }
-      if (out.kind === "CONFLICT") {
-        return NextResponse.json({ ok: false, status: "CONFLICT", error: "Could not redeem. Please try again." }, { status: 409 });
-      }
-
-      // REDEEMED
       return NextResponse.json(
         {
-          ok: true,
-          status: "REDEEMED",
-          message: "Redemption successful.",
-          redemption: { id: out.redemptionId, redeemedAt: out.redeemedAt },
+          ok: false,
+          status: "INVALID",
+          error:
+            "This QR is not redeemable. Ask the customer to open the QR page and generate a fresh code.",
         },
-        { status: 200 }
+        { status: 400 }
       );
     }
 
@@ -295,22 +213,35 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Redemption code not found" }, { status: 404 });
     }
     if (out.kind === "EXPIRED") {
-      return NextResponse.json({ ok: false, status: "EXPIRED", error: "This QR code has expired." }, { status: 410 });
+      return NextResponse.json(
+        { ok: false, status: "EXPIRED", error: "This QR code has expired." },
+        { status: 410 }
+      );
     }
     if (out.kind === "ALREADY_REDEEMED") {
       return NextResponse.json(
-        { ok: false, status: "ALREADY_REDEEMED", error: "This QR code has already been redeemed.", redeemedAt: out.redeemedAt },
+        {
+          ok: false,
+          status: "ALREADY_REDEEMED",
+          error: "This QR code has already been redeemed.",
+          redeemedAt: out.redeemedAt,
+        },
         { status: 409 }
       );
     }
     if (out.kind === "SOLD_OUT") {
-      return NextResponse.json({ ok: false, status: "SOLD_OUT", error: "This deal has been fully redeemed." }, { status: 409 });
+      return NextResponse.json(
+        { ok: false, status: "SOLD_OUT", error: "This deal has been fully redeemed." },
+        { status: 409 }
+      );
     }
     if (out.kind === "CONFLICT") {
-      return NextResponse.json({ ok: false, status: "CONFLICT", error: "Could not redeem. Please try again." }, { status: 409 });
+      return NextResponse.json(
+        { ok: false, status: "CONFLICT", error: "Could not redeem. Please try again." },
+        { status: 409 }
+      );
     }
 
-    // Success: include a tiny bit of info (optional)
     return NextResponse.json(
       {
         ok: true,
