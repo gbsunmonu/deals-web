@@ -1,6 +1,6 @@
 // app/api/redemptions/confirm/route.ts
 import { NextRequest, NextResponse } from "next/server";
-import { prisma } from "@/lib/prisma";
+import prisma from "@/lib/prisma";
 import type { Prisma } from "@prisma/client";
 
 type LegacyDealQrPayload = {
@@ -47,11 +47,6 @@ async function withTxnRetry<T>(fn: () => Promise<T>, retries = 3): Promise<T> {
   throw lastErr;
 }
 
-/**
- * ✅ IMPORTANT:
- * Deal.id is UUID. When dealId is a string param, Postgres can error (uuid=text).
- * Cast inside SQL.
- */
 async function lockDealAndEnforceCapacity(
   tx: Prisma.TransactionClient,
   dealId: string
@@ -114,7 +109,6 @@ export async function POST(req: NextRequest) {
 
     let scannedCode: string | null = null;
 
-    // allow scanning a URL that ends with /<shortCode>
     if (/^https?:\/\//i.test(rawText)) {
       try {
         const u = new URL(rawText);
@@ -130,26 +124,18 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "QR code is empty" }, { status: 400 });
     }
 
-    // ----------------------------
-    // LEGACY JSON payload support
-    // ----------------------------
+    // ✅ LEGACY JSON payload support
     if (scannedCode.startsWith("{") && scannedCode.endsWith("}")) {
       let legacy: LegacyDealQrPayload;
 
       try {
         legacy = JSON.parse(scannedCode);
       } catch {
-        return NextResponse.json(
-          { error: "QR code is not a valid deal code" },
-          { status: 400 }
-        );
+        return NextResponse.json({ error: "QR code is not a valid deal code" }, { status: 400 });
       }
 
       if (legacy.type !== "DEAL" || !legacy.dealId) {
-        return NextResponse.json(
-          { error: "QR code is not a valid deal code" },
-          { status: 400 }
-        );
+        return NextResponse.json({ error: "QR code is not a valid deal code" }, { status: 400 });
       }
 
       if (legacy.expiresAt) {
@@ -172,10 +158,12 @@ export async function POST(req: NextRequest) {
 
           const shortCode = await generateUniqueRedemptionShortCode();
 
+          // ✅ IMPORTANT: don’t store huge JSON in `code` (can overflow varchar)
+          // Use shortCode as the redemption code.
           const redemption = await tx.redemption.create({
             data: {
               dealId: legacy.dealId,
-              code: scannedCode,
+              code: shortCode,
               shortCode,
               redeemedAt: new Date(),
               expiresAt: new Date(Date.now() + 15 * 60 * 1000),
@@ -207,9 +195,7 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    // ----------------------------
-    // NORMAL FLOW (expiry + safe)
-    // ----------------------------
+    // NORMAL FLOW
     return await withTxnRetry(async () => {
       const now = new Date();
 
@@ -229,15 +215,8 @@ export async function POST(req: NextRequest) {
 
         if (!redemption) return { kind: "NOT_FOUND" as const };
 
-        // expired? -> unlock device
         const exp = redemption.expiresAt ? new Date(redemption.expiresAt) : null;
-        if (exp && !Number.isNaN(exp.getTime()) && exp <= now) {
-          await tx.redemption.update({
-            where: { id: redemption.id },
-            data: { activeKey: null },
-          });
-          return { kind: "EXPIRED" as const };
-        }
+        if (exp && !Number.isNaN(exp.getTime()) && exp <= now) return { kind: "EXPIRED" as const };
 
         if (redemption.redeemedAt) {
           return { kind: "ALREADY_REDEEMED" as const, redeemedAt: redemption.redeemedAt };
@@ -246,7 +225,6 @@ export async function POST(req: NextRequest) {
         const { soldOut } = await lockDealAndEnforceCapacity(tx, redemption.dealId);
         if (soldOut) return { kind: "SOLD_OUT" as const };
 
-        // redeem only if still valid & not redeemed, also release device lock
         const updated = await tx.redemption.updateMany({
           where: { id: redemption.id, redeemedAt: null, expiresAt: { gt: now } },
           data: { redeemedAt: now, activeKey: null },
@@ -258,18 +236,10 @@ export async function POST(req: NextRequest) {
             select: { redeemedAt: true, expiresAt: true },
           });
 
-          if (again?.redeemedAt) {
-            return { kind: "ALREADY_REDEEMED" as const, redeemedAt: again.redeemedAt };
-          }
+          if (again?.redeemedAt) return { kind: "ALREADY_REDEEMED" as const, redeemedAt: again.redeemedAt };
 
           const exp2 = again?.expiresAt ? new Date(again.expiresAt) : null;
-          if (exp2 && exp2 <= now) {
-            await tx.redemption.update({
-              where: { id: redemption.id },
-              data: { activeKey: null },
-            });
-            return { kind: "EXPIRED" as const };
-          }
+          if (exp2 && exp2 <= now) return { kind: "EXPIRED" as const };
 
           return { kind: "CONFLICT" as const };
         }

@@ -4,8 +4,12 @@ import type { Prisma } from "@prisma/client";
 import crypto from "crypto";
 
 const QR_TTL_MINUTES = 15;
-const COOLDOWN_SECONDS = 20; // per-device cooldown between NEW QR generations
-const DAILY_DEVICE_CAP = 10; // ✅ max NEW QRs per device per 24h (tune this)
+
+// ✅ cooldown between NEW QR generations (per device + deal)
+const COOLDOWN_SECONDS = 20;
+
+// ✅ anti-hoarding: max active (unredeemed + unexpired) QRs allowed per device across all deals
+const MAX_ACTIVE_QRS_PER_DEVICE = 3;
 
 function sha256(input: string) {
   return crypto.createHash("sha256").update(input).digest("hex");
@@ -68,11 +72,12 @@ async function lockDealAndCheckSoldOut(
 
   const deal = rows[0];
 
+  // Only allow claim while deal is live
   if (deal.startsAt > now) return { ok: false, status: 409, error: "Deal has not started yet" };
   if (deal.endsAt < now) return { ok: false, status: 409, error: "Deal has ended" };
 
   const max = deal.maxRedemptions;
-  if (typeof max !== "number" || max <= 0) return { ok: true };
+  if (typeof max !== "number" || max <= 0) return { ok: true }; // unlimited
 
   const redeemedCount = await tx.redemption.count({
     where: { dealId, redeemedAt: { not: null } },
@@ -86,7 +91,6 @@ async function lockDealAndCheckSoldOut(
 export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
   try {
     const { id: dealId } = await ctx.params;
-
     const deviceId = req.headers.get("x-device-id") || req.headers.get("x-device") || "";
 
     if (!dealId) return NextResponse.json({ ok: false, error: "Missing deal id" }, { status: 400 });
@@ -99,23 +103,43 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
 
     const result = await withTxnRetry(async () => {
       return prisma.$transaction(async (tx) => {
+        // ✅ ensure deal is live + not sold out (locks deal row)
         const gate = await lockDealAndCheckSoldOut(tx, dealId);
         if (!gate.ok) return { kind: "ERR" as const, status: gate.status, error: gate.error };
 
         const now = new Date();
 
-        // ✅ 1) Reuse active QR if it exists & still valid (NO daily cap hit)
+        // ✅ 0) Clean up expired active locks for THIS device (anti-hoarding hygiene)
+        // If a redemption is expired and still has activeKey, clear it.
+        await tx.redemption.updateMany({
+          where: {
+            deviceHash,
+            redeemedAt: null,
+            expiresAt: { not: null, lte: now },
+            activeKey: { not: null },
+          } as any,
+          data: { activeKey: null },
+        });
+
+        // ✅ 1) Reuse active QR for this deal+device if still valid
         const existing = await tx.redemption.findFirst({
           where: { activeKey },
-          select: { id: true, shortCode: true, redeemedAt: true, expiresAt: true },
+          select: {
+            id: true,
+            shortCode: true,
+            redeemedAt: true,
+            expiresAt: true, // might be nullable in DB, so guard
+          },
         });
 
         if (existing) {
           const exp = existing.expiresAt ? new Date(existing.expiresAt) : null;
 
+          // redeemed -> unlock
           if (existing.redeemedAt) {
             await tx.redemption.update({ where: { id: existing.id }, data: { activeKey: null } });
           } else if (exp && exp > now) {
+            // ✅ still valid -> reuse
             return {
               kind: "OK" as const,
               redemptionId: existing.id,
@@ -124,15 +148,39 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
               reused: true,
             };
           } else {
+            // expired OR missing expiry -> unlock
             await tx.redemption.update({ where: { id: existing.id }, data: { activeKey: null } });
           }
         }
 
-        // ✅ 2) Per-device cooldown (only for NEW QR)
+        // ✅ 2) Anti-hoarding: limit how many ACTIVE QRs a device can hold across all deals
+        // Active = redeemedAt null AND expiresAt in future AND activeKey not null
+        const activeCount = await tx.redemption.count({
+          where: {
+            deviceHash,
+            redeemedAt: null,
+            activeKey: { not: null },
+            expiresAt: { not: null, gt: now },
+          } as any,
+        });
+
+        if (activeCount >= MAX_ACTIVE_QRS_PER_DEVICE) {
+          return {
+            kind: "ERR" as const,
+            status: 429,
+            error: `Too many active QRs on this device. Please redeem one or wait for expiry.`,
+            retryAfterSec: 15,
+            reason: "HOARDING_LIMIT",
+            activeCount,
+            limit: MAX_ACTIVE_QRS_PER_DEVICE,
+          };
+        }
+
+        // ✅ 3) Per-device cooldown (only applies when creating a NEW QR for this deal)
         const latest = await tx.redemption.findFirst({
           where: { dealId, deviceHash },
           orderBy: { createdAt: "desc" },
-          select: { id: true, createdAt: true },
+          select: { createdAt: true },
         });
 
         if (latest) {
@@ -146,46 +194,12 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
               status: 429,
               error: `Please wait ${retryAfterSec}s before generating a new QR.`,
               retryAfterSec,
-              cooldownSeconds: retryAfterSec,
+              reason: "COOLDOWN",
             };
           }
         }
 
-        // ✅ 3) Daily per-device cap (rolling 24 hours) — only for NEW QR
-        const windowStart = new Date(now.getTime() - 24 * 60 * 60 * 1000);
-
-        const usedInWindow = await tx.redemption.count({
-          where: {
-            deviceHash,
-            dealId,
-            createdAt: { gte: windowStart },
-          },
-        });
-
-        if (usedInWindow >= DAILY_DEVICE_CAP) {
-          // Find earliest in window to compute retry time (nice UX)
-          const first = await tx.redemption.findFirst({
-            where: { deviceHash, dealId, createdAt: { gte: windowStart } },
-            orderBy: { createdAt: "asc" },
-            select: { createdAt: true },
-          });
-
-          const resetAt = first ? new Date(new Date(first.createdAt).getTime() + 24 * 60 * 60 * 1000) : null;
-          const retryAfterSec =
-            resetAt && resetAt.getTime() > now.getTime()
-              ? Math.ceil((resetAt.getTime() - now.getTime()) / 1000)
-              : 60;
-
-          return {
-            kind: "ERR" as const,
-            status: 429,
-            error: `Daily limit reached for this device. Try again later.`,
-            retryAfterSec,
-            dailyLimitSeconds: retryAfterSec,
-          };
-        }
-
-        // ✅ 4) Create new QR
+        // ✅ 4) Create new QR (locked to this device+deal for 15 minutes)
         const shortCode = await generateUniqueShortCode(tx);
         const expiresAt = new Date(Date.now() + QR_TTL_MINUTES * 60 * 1000);
 
@@ -193,7 +207,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
           data: {
             dealId,
             shortCode,
-            code: shortCode,
+            code: shortCode, // confirm route accepts shortCode OR code
             redeemedAt: null,
             expiresAt,
             deviceHash,
@@ -206,7 +220,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
           kind: "OK" as const,
           redemptionId: created.id,
           shortCode: created.shortCode,
-          expiresAt: expiresAt.toISOString(),
+          expiresAt: expiresAt.toISOString(), // use local expiresAt (never null)
           reused: false,
         };
       });
@@ -216,13 +230,16 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
       const headers: Record<string, string> = {};
       if ((result as any).retryAfterSec) headers["Retry-After"] = String((result as any).retryAfterSec);
 
+      // client UI expects cooldownSeconds/retryAfterSeconds sometimes
       return NextResponse.json(
         {
           ok: false,
           error: result.error,
-          cooldownSeconds: (result as any).cooldownSeconds,
-          dailyLimitSeconds: (result as any).dailyLimitSeconds,
+          reason: (result as any).reason,
           retryAfterSeconds: (result as any).retryAfterSec,
+          cooldownSeconds: (result as any).retryAfterSec,
+          activeCount: (result as any).activeCount,
+          limit: (result as any).limit,
         },
         { status: result.status, headers }
       );
