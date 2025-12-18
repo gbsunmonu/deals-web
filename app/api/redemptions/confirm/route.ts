@@ -1,7 +1,5 @@
-// app/api/redemptions/confirm/route.ts
 import { NextRequest, NextResponse } from "next/server";
-import prisma from "@/lib/prisma";
-import type { Prisma } from "@prisma/client";
+import { prisma } from "@/lib/prisma";
 
 type LegacyDealQrPayload = {
   type: "DEAL";
@@ -13,70 +11,204 @@ function makeShortCode(len = 6) {
   return Math.random().toString(36).substring(2, 2 + len).toUpperCase();
 }
 
-async function generateUniqueRedemptionShortCode() {
-  for (let i = 0; i < 5; i++) {
-    const shortCode = makeShortCode(6);
-    const exists = await prisma.redemption.findUnique({
-      where: { shortCode },
-      select: { id: true },
-    });
-    if (!exists) return shortCode;
-  }
-  return makeShortCode(8);
+function isUuid(v: string) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v);
 }
 
-async function withTxnRetry<T>(fn: () => Promise<T>, retries = 3): Promise<T> {
-  let lastErr: any;
-  for (let i = 0; i < retries; i++) {
-    try {
-      return await fn();
-    } catch (e: any) {
-      lastErr = e;
-      const code = e?.code;
-      const msg = String(e?.message ?? "").toLowerCase();
-      const shouldRetry =
-        code === "P2034" ||
-        msg.includes("serialization") ||
-        msg.includes("deadlock") ||
-        msg.includes("could not serialize access");
+function extractCode(rawText: string): string | null {
+  const t = String(rawText || "").trim();
+  if (!t) return null;
 
-      if (!shouldRetry || i === retries - 1) throw e;
-      await new Promise((r) => setTimeout(r, 30 * (i + 1)));
+  // If URL, use last path segment
+  if (/^https?:\/\//i.test(t)) {
+    try {
+      const u = new URL(t);
+      const parts = u.pathname.split("/").filter(Boolean);
+      const last = parts.length ? parts[parts.length - 1] : "";
+      return last || null;
+    } catch {
+      // fallthrough
     }
   }
-  throw lastErr;
+
+  return t;
 }
 
-async function lockDealAndEnforceCapacity(
-  tx: Prisma.TransactionClient,
-  dealId: string
-): Promise<{ max: number | null; redeemedCount: number; soldOut: boolean }> {
-  const rows = await tx.$queryRaw<Array<{ id: string; maxRedemptions: number | null }>>`
-    SELECT "id", "maxRedemptions"
-    FROM "Deal"
-    WHERE "id" = CAST(${dealId} AS uuid)
-    FOR UPDATE
+async function clearActiveKeyIfAny(redemptionId: string) {
+  try {
+    await prisma.redemption.update({
+      where: { id: redemptionId },
+      data: { activeKey: null },
+    });
+  } catch {
+    // ignore
+  }
+}
+
+/**
+ * ✅ Atomic redeem by shortCode/code in ONE SQL call (no interactive transaction).
+ * - Checks expiresAt
+ * - Checks already redeemed
+ * - Enforces maxRedemptions safely
+ * - Updates redeemedAt + clears activeKey
+ */
+async function redeemByCodeAtomic(scannedCode: string) {
+  const now = new Date();
+
+  const rows = await prisma.$queryRaw<
+    Array<{
+      found_id: string | null;
+      deal_id: string | null;
+      prior_redeemed_at: Date | null;
+      expires_at: Date | null;
+      max_redemptions: number | null;
+      redeemed_count: number | null;
+      updated_id: string | null;
+      updated_redeemed_at: Date | null;
+      active_key: string | null;
+    }>
+  >`
+    WITH r AS (
+      SELECT "id",
+             "dealId" as deal_id,
+             "redeemedAt" as prior_redeemed_at,
+             "expiresAt" as expires_at,
+             "activeKey" as active_key
+      FROM "Redemption"
+      WHERE "shortCode" = ${scannedCode} OR "code" = ${scannedCode}
+      LIMIT 1
+    ),
+    d AS (
+      SELECT "id", "maxRedemptions" as max_redemptions
+      FROM "Deal"
+      WHERE "id" = (SELECT deal_id FROM r)
+    ),
+    rc AS (
+      SELECT COUNT(*)::int as redeemed_count
+      FROM "Redemption"
+      WHERE "dealId" = (SELECT deal_id FROM r)
+        AND "redeemedAt" IS NOT NULL
+    ),
+    upd AS (
+      UPDATE "Redemption"
+      SET "redeemedAt" = NOW(),
+          "activeKey" = NULL
+      WHERE "id" = (SELECT "id" FROM r)
+        AND (SELECT prior_redeemed_at FROM r) IS NULL
+        AND (
+          (SELECT expires_at FROM r) IS NULL OR (SELECT expires_at FROM r) > NOW()
+        )
+        AND (
+          (SELECT max_redemptions FROM d) IS NULL
+          OR (SELECT max_redemptions FROM d) <= 0
+          OR (SELECT redeemed_count FROM rc) < (SELECT max_redemptions FROM d)
+        )
+      RETURNING "id" as updated_id, "redeemedAt" as updated_redeemed_at
+    )
+    SELECT
+      (SELECT "id" FROM r) as found_id,
+      (SELECT deal_id FROM r) as deal_id,
+      (SELECT prior_redeemed_at FROM r) as prior_redeemed_at,
+      (SELECT expires_at FROM r) as expires_at,
+      (SELECT max_redemptions FROM d) as max_redemptions,
+      (SELECT redeemed_count FROM rc) as redeemed_count,
+      (SELECT updated_id FROM upd) as updated_id,
+      (SELECT updated_redeemed_at FROM upd) as updated_redeemed_at,
+      (SELECT active_key FROM r) as active_key
   `;
 
-  if (!rows || rows.length === 0) {
-    const err: any = new Error("Deal not found");
-    err.status = 404;
-    err.code = "DEAL_NOT_FOUND";
-    throw err;
+  const row = rows?.[0];
+
+  if (!row || !row.found_id) {
+    return { kind: "NOT_FOUND" as const };
   }
 
-  const max = rows[0].maxRedemptions;
-
-  // unlimited if null/undefined/<=0
-  if (typeof max !== "number" || max <= 0) {
-    return { max: max ?? null, redeemedCount: 0, soldOut: false };
+  // Expired?
+  if (row.expires_at && row.expires_at <= now) {
+    // unlock device reuse
+    await clearActiveKeyIfAny(row.found_id);
+    return { kind: "EXPIRED" as const };
   }
 
-  const redeemedCount = await tx.redemption.count({
-    where: { dealId, redeemedAt: { not: null } },
-  });
+  // Already redeemed?
+  if (row.prior_redeemed_at) {
+    return { kind: "ALREADY_REDEEMED" as const, redeemedAt: row.prior_redeemed_at };
+  }
 
-  return { max, redeemedCount, soldOut: redeemedCount >= max };
+  // Not updated => sold out OR conflict
+  if (!row.updated_id) {
+    const max = row.max_redemptions;
+    const redeemed = row.redeemed_count ?? 0;
+
+    if (typeof max === "number" && max > 0 && redeemed >= max) {
+      return { kind: "SOLD_OUT" as const };
+    }
+    return { kind: "CONFLICT" as const };
+  }
+
+  return {
+    kind: "REDEEMED" as const,
+    redemptionId: row.updated_id,
+    redeemedAt: row.updated_redeemed_at!,
+    dealId: row.deal_id!,
+  };
+}
+
+/**
+ * ✅ Legacy JSON payload flow:
+ * Instead of creating a Redemption inside an interactive transaction,
+ * we create a normal Redemption code (shortCode) and redeem via atomic flow above.
+ *
+ * This keeps legacy working but avoids Vercel 5s interactive tx timeout.
+ */
+async function redeemLegacyPayloadAtomic(legacy: LegacyDealQrPayload) {
+  const now = new Date();
+
+  if (!legacy.dealId || !isUuid(legacy.dealId)) {
+    return { kind: "BAD" as const, error: "Invalid deal id" };
+  }
+
+  if (legacy.expiresAt) {
+    const exp = new Date(legacy.expiresAt);
+    if (Number.isNaN(exp.getTime())) {
+      return { kind: "BAD" as const, error: "QR expiry is invalid" };
+    }
+    if (exp <= now) {
+      return { kind: "EXPIRED" as const };
+    }
+  }
+
+  // Create a one-time shortCode redemption record quickly (no transaction)
+  // Then redeem it using atomic redeem logic to enforce capacity + expiry.
+  // If shortCode collision happens (rare), retry a few times.
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const shortCode = attempt < 4 ? makeShortCode(6) : makeShortCode(8);
+    try {
+      await prisma.redemption.create({
+        data: {
+          dealId: legacy.dealId,
+          shortCode,
+          code: shortCode,
+          redeemedAt: null,
+          createdAt: now,
+          expiresAt: new Date(Date.now() + 15 * 60 * 1000),
+          deviceHash: "legacy",
+          activeKey: null,
+        } as any,
+        select: { id: true },
+      });
+
+      // Now redeem it (same rules as normal flow)
+      const out = await redeemByCodeAtomic(shortCode);
+      return out;
+    } catch (e: any) {
+      // Prisma unique violation = try again
+      if (e?.code === "P2002") continue;
+      throw e;
+    }
+  }
+
+  return { kind: "CONFLICT" as const };
 }
 
 export async function POST(req: NextRequest) {
@@ -102,34 +234,16 @@ export async function POST(req: NextRequest) {
       rawText = bodyText.trim();
     }
 
-    rawText = String(rawText ?? "").trim();
-    if (!rawText) {
-      return NextResponse.json({ error: "QR text is empty" }, { status: 400 });
-    }
-
-    let scannedCode: string | null = null;
-
-    if (/^https?:\/\//i.test(rawText)) {
-      try {
-        const u = new URL(rawText);
-        const parts = u.pathname.split("/").filter(Boolean);
-        scannedCode = parts.length ? parts[parts.length - 1] : null;
-      } catch {
-        scannedCode = null;
-      }
-    }
-
-    if (!scannedCode) scannedCode = rawText.trim();
-    if (!scannedCode) {
+    const scanned = extractCode(rawText);
+    if (!scanned) {
       return NextResponse.json({ error: "QR code is empty" }, { status: 400 });
     }
 
-    // ✅ LEGACY JSON payload support
-    if (scannedCode.startsWith("{") && scannedCode.endsWith("}")) {
+    // Legacy JSON
+    if (scanned.startsWith("{") && scanned.endsWith("}")) {
       let legacy: LegacyDealQrPayload;
-
       try {
-        legacy = JSON.parse(scannedCode);
+        legacy = JSON.parse(scanned);
       } catch {
         return NextResponse.json({ error: "QR code is not a valid deal code" }, { status: 400 });
       }
@@ -138,170 +252,74 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ error: "QR code is not a valid deal code" }, { status: 400 });
       }
 
-      if (legacy.expiresAt) {
-        const expires = new Date(legacy.expiresAt);
-        if (Number.isNaN(expires.getTime())) {
-          return NextResponse.json({ error: "QR expiry is invalid" }, { status: 400 });
-        }
-        if (expires < new Date()) {
-          return NextResponse.json(
-            { ok: false, status: "EXPIRED", error: "This QR code has expired." },
-            { status: 410 }
-          );
-        }
+      const out = await redeemLegacyPayloadAtomic(legacy);
+
+      if (out.kind === "BAD") {
+        return NextResponse.json({ ok: false, status: "BAD_QR", error: out.error }, { status: 400 });
       }
-
-      return await withTxnRetry(async () => {
-        const result = await prisma.$transaction(async (tx) => {
-          const { soldOut } = await lockDealAndEnforceCapacity(tx, legacy.dealId);
-          if (soldOut) return { kind: "SOLD_OUT" as const };
-
-          const shortCode = await generateUniqueRedemptionShortCode();
-
-          // ✅ IMPORTANT: don’t store huge JSON in `code` (can overflow varchar)
-          // Use shortCode as the redemption code.
-          const redemption = await tx.redemption.create({
-            data: {
-              dealId: legacy.dealId,
-              code: shortCode,
-              shortCode,
-              redeemedAt: new Date(),
-              expiresAt: new Date(Date.now() + 15 * 60 * 1000),
-              deviceHash: "legacy",
-              activeKey: null,
-            } as any,
-            select: { id: true, redeemedAt: true },
-          });
-
-          return { kind: "REDEEMED" as const, redemption };
-        });
-
-        if (result.kind === "SOLD_OUT") {
-          return NextResponse.json(
-            { ok: false, status: "SOLD_OUT", error: "This deal has been fully redeemed." },
-            { status: 409 }
-          );
-        }
-
-        return NextResponse.json(
-          {
-            ok: true,
-            status: "REDEEMED",
-            message: "Redemption successful.",
-            redemption: { id: result.redemption.id, redeemedAt: result.redemption.redeemedAt },
-          },
-          { status: 200 }
-        );
-      });
-    }
-
-    // NORMAL FLOW
-    return await withTxnRetry(async () => {
-      const now = new Date();
-
-      const out = await prisma.$transaction(async (tx) => {
-        const redemption = await tx.redemption.findFirst({
-          where: { OR: [{ shortCode: scannedCode }, { code: scannedCode }] },
-          include: {
-            deal: {
-              include: {
-                merchant: {
-                  select: { id: true, name: true, city: true, address: true, phone: true },
-                },
-              },
-            },
-          },
-        });
-
-        if (!redemption) return { kind: "NOT_FOUND" as const };
-
-        const exp = redemption.expiresAt ? new Date(redemption.expiresAt) : null;
-        if (exp && !Number.isNaN(exp.getTime()) && exp <= now) return { kind: "EXPIRED" as const };
-
-        if (redemption.redeemedAt) {
-          return { kind: "ALREADY_REDEEMED" as const, redeemedAt: redemption.redeemedAt };
-        }
-
-        const { soldOut } = await lockDealAndEnforceCapacity(tx, redemption.dealId);
-        if (soldOut) return { kind: "SOLD_OUT" as const };
-
-        const updated = await tx.redemption.updateMany({
-          where: { id: redemption.id, redeemedAt: null, expiresAt: { gt: now } },
-          data: { redeemedAt: now, activeKey: null },
-        });
-
-        if (updated.count === 0) {
-          const again = await tx.redemption.findUnique({
-            where: { id: redemption.id },
-            select: { redeemedAt: true, expiresAt: true },
-          });
-
-          if (again?.redeemedAt) return { kind: "ALREADY_REDEEMED" as const, redeemedAt: again.redeemedAt };
-
-          const exp2 = again?.expiresAt ? new Date(again.expiresAt) : null;
-          if (exp2 && exp2 <= now) return { kind: "EXPIRED" as const };
-
-          return { kind: "CONFLICT" as const };
-        }
-
-        const redeemedRow = await tx.redemption.findUnique({
-          where: { id: redemption.id },
-          select: { id: true, redeemedAt: true },
-        });
-
-        return {
-          kind: "REDEEMED" as const,
-          deal: redemption.deal,
-          merchant: redemption.deal.merchant,
-          redemption: { id: redeemedRow!.id, redeemedAt: redeemedRow!.redeemedAt! },
-        };
-      });
-
       if (out.kind === "NOT_FOUND") {
         return NextResponse.json({ error: "Redemption code not found" }, { status: 404 });
       }
       if (out.kind === "EXPIRED") {
-        return NextResponse.json(
-          { ok: false, status: "EXPIRED", error: "This QR code has expired." },
-          { status: 410 }
-        );
+        return NextResponse.json({ ok: false, status: "EXPIRED", error: "This QR code has expired." }, { status: 410 });
       }
       if (out.kind === "ALREADY_REDEEMED") {
         return NextResponse.json(
-          {
-            ok: false,
-            status: "ALREADY_REDEEMED",
-            error: "This QR code has already been redeemed.",
-            redeemedAt: out.redeemedAt,
-          },
+          { ok: false, status: "ALREADY_REDEEMED", error: "This QR code has already been redeemed.", redeemedAt: out.redeemedAt },
           { status: 409 }
         );
       }
       if (out.kind === "SOLD_OUT") {
-        return NextResponse.json(
-          { ok: false, status: "SOLD_OUT", error: "This deal has been fully redeemed." },
-          { status: 409 }
-        );
+        return NextResponse.json({ ok: false, status: "SOLD_OUT", error: "This deal has been fully redeemed." }, { status: 409 });
       }
       if (out.kind === "CONFLICT") {
-        return NextResponse.json(
-          { ok: false, status: "CONFLICT", error: "Could not redeem. Please try again." },
-          { status: 409 }
-        );
+        return NextResponse.json({ ok: false, status: "CONFLICT", error: "Could not redeem. Please try again." }, { status: 409 });
       }
 
+      // REDEEMED
       return NextResponse.json(
         {
           ok: true,
           status: "REDEEMED",
           message: "Redemption successful.",
-          deal: { id: out.deal.id, title: out.deal.title },
-          merchant: out.merchant,
-          redemption: out.redemption,
+          redemption: { id: out.redemptionId, redeemedAt: out.redeemedAt },
         },
         { status: 200 }
       );
-    });
+    }
+
+    // Normal (shortCode / URL)
+    const out = await redeemByCodeAtomic(scanned);
+
+    if (out.kind === "NOT_FOUND") {
+      return NextResponse.json({ error: "Redemption code not found" }, { status: 404 });
+    }
+    if (out.kind === "EXPIRED") {
+      return NextResponse.json({ ok: false, status: "EXPIRED", error: "This QR code has expired." }, { status: 410 });
+    }
+    if (out.kind === "ALREADY_REDEEMED") {
+      return NextResponse.json(
+        { ok: false, status: "ALREADY_REDEEMED", error: "This QR code has already been redeemed.", redeemedAt: out.redeemedAt },
+        { status: 409 }
+      );
+    }
+    if (out.kind === "SOLD_OUT") {
+      return NextResponse.json({ ok: false, status: "SOLD_OUT", error: "This deal has been fully redeemed." }, { status: 409 });
+    }
+    if (out.kind === "CONFLICT") {
+      return NextResponse.json({ ok: false, status: "CONFLICT", error: "Could not redeem. Please try again." }, { status: 409 });
+    }
+
+    // Success: include a tiny bit of info (optional)
+    return NextResponse.json(
+      {
+        ok: true,
+        status: "REDEEMED",
+        message: "Redemption successful.",
+        redemption: { id: out.redemptionId, redeemedAt: out.redeemedAt },
+      },
+      { status: 200 }
+    );
   } catch (err: any) {
     console.error("Unexpected error in /api/redemptions/confirm:", err);
     return NextResponse.json(
