@@ -1,33 +1,36 @@
 // app/merchant/redeem/page.tsx
 import { prisma } from "@/lib/prisma";
 import { getServerSupabaseRSC } from "@/lib/supabase";
-import RedeemClient, { type RecentRedemptionRow } from "./redeem-client";
 import { redirect } from "next/navigation";
+import RedeemClient, { type RecentRedemptionRow } from "./redeem-client";
 
 export const dynamic = "force-dynamic";
 
 export default async function MerchantRedeemPage() {
-  // ✅ IMPORTANT: getServerSupabaseRSC() returns a Promise in your setup
+  // ✅ Auth (Supabase user)
   const supabase = await getServerSupabaseRSC();
-
   const {
     data: { user },
   } = await supabase.auth.getUser();
 
   if (!user) redirect("/login");
 
-  /**
-   * ✅ Merchant-only filter:
-   * Only show redemptions where the redeemed deal belongs to this merchant user.
-   *
-   * Assumption (based on your app): Deal has merchantId and merchant user id matches it.
-   */
+  // ✅ Map Supabase user -> Merchant row (Merchant.userId)
+  const merchant = await prisma.merchant.findUnique({
+    where: { userId: user.id },
+    select: { id: true, name: true },
+  });
+
+  if (!merchant) {
+    // If you have a better route for onboarding, replace this.
+    redirect("/merchant/profile");
+  }
+
+  // ✅ Merchant-only recent redemptions
   const recent = await prisma.redemption.findMany({
     where: {
       redeemedAt: { not: null },
-      deal: {
-        merchantId: user.id,
-      },
+      deal: { merchantId: merchant.id },
     },
     orderBy: { redeemedAt: "desc" },
     take: 20,
@@ -54,7 +57,7 @@ export default async function MerchantRedeemPage() {
     deal: {
       id: r.deal.id,
       title: r.deal.title,
-      discountType: r.deal.discountType,
+      discountType: String(r.deal.discountType),
       discountValue: Number(r.deal.discountValue ?? 0),
       originalPrice: r.deal.originalPrice ?? null,
     },
@@ -64,10 +67,11 @@ export default async function MerchantRedeemPage() {
     <main className="mx-auto max-w-5xl px-4 py-10">
       <header className="mb-8">
         <h1 className="text-4xl font-semibold tracking-tight text-slate-900">
-          Redeem
+          Redemptions
         </h1>
         <p className="mt-2 text-slate-600">
-          Scan customer QR codes and review your recent redemptions.
+          Redeem customer QR codes and review recent redemptions for{" "}
+          <span className="font-semibold">{merchant.name}</span>.
         </p>
       </header>
 

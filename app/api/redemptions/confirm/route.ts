@@ -1,7 +1,7 @@
+// app/api/redemptions/confirm/route.ts
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { getServerSupabaseRSC } from "@/lib/supabase";
-import { Prisma } from "@prisma/client";
 
 type LegacyDealQrPayload = {
   type: "DEAL";
@@ -23,13 +23,16 @@ function extractCode(rawText: string): string | null {
   const t = String(rawText || "").trim();
   if (!t) return null;
 
+  // If URL, use last path segment
   if (/^https?:\/\//i.test(t)) {
     try {
       const u = new URL(t);
       const parts = u.pathname.split("/").filter(Boolean);
       const last = parts.length ? parts[parts.length - 1] : "";
       return last || null;
-    } catch {}
+    } catch {
+      // fallthrough
+    }
   }
 
   return t;
@@ -41,14 +44,16 @@ async function clearActiveKeyIfAny(redemptionId: string) {
       where: { id: redemptionId },
       data: { activeKey: null },
     });
-  } catch {}
+  } catch {
+    // ignore
+  }
 }
 
 /**
- * ✅ Atomic redeem (no interactive tx)
- * ✅ Merchant-locked: Deal.merchantId must equal merchant.id
+ * ✅ Atomic redeem by shortCode/code in ONE SQL call (no interactive transaction).
+ * ✅ Merchant-locked: only redeem if deal.merchantId === merchantId (Merchant.id)
  */
-async function redeemByCodeAtomic(scannedCode: string, merchantDbId: string) {
+async function redeemByCodeAtomic(scannedCode: string, merchantId: string) {
   const now = new Date();
 
   const rows = await prisma.$queryRaw<
@@ -63,26 +68,25 @@ async function redeemByCodeAtomic(scannedCode: string, merchantDbId: string) {
       updated_redeemed_at: Date | null;
       merchant_id: string | null;
     }>
-  >(Prisma.sql`
+  >`
     WITH r AS (
       SELECT "id",
-             "dealId"     AS deal_id,
-             "redeemedAt" AS prior_redeemed_at,
-             "expiresAt"  AS expires_at
+             "dealId" as deal_id,
+             "redeemedAt" as prior_redeemed_at,
+             "expiresAt" as expires_at
       FROM "Redemption"
-      WHERE "shortCode" = ${scannedCode}
-         OR "code"      = ${scannedCode}
+      WHERE "shortCode" = ${scannedCode} OR "code" = ${scannedCode}
       LIMIT 1
     ),
     d AS (
       SELECT "id",
-             "maxRedemptions" AS max_redemptions,
-             "merchantId"     AS merchant_id
+             "maxRedemptions" as max_redemptions,
+             "merchantId" as merchant_id
       FROM "Deal"
-      WHERE "id" = (SELECT deal_id FROM r)
+      WHERE "id" = (SELECT deal_id FROM r)::uuid
     ),
     rc AS (
-      SELECT COUNT(*)::int AS redeemed_count
+      SELECT COUNT(*)::int as redeemed_count
       FROM "Redemption"
       WHERE "dealId" = (SELECT deal_id FROM r)
         AND "redeemedAt" IS NOT NULL
@@ -90,12 +94,11 @@ async function redeemByCodeAtomic(scannedCode: string, merchantDbId: string) {
     upd AS (
       UPDATE "Redemption"
       SET "redeemedAt" = NOW(),
-          "activeKey"  = NULL
+          "activeKey" = NULL
       WHERE "id" = (SELECT "id" FROM r)
         AND (SELECT prior_redeemed_at FROM r) IS NULL
         AND (
-          (SELECT expires_at FROM r) IS NULL
-          OR (SELECT expires_at FROM r) > NOW()
+          (SELECT expires_at FROM r) IS NULL OR (SELECT expires_at FROM r) > NOW()
         )
         AND (
           (SELECT max_redemptions FROM d) IS NULL
@@ -103,46 +106,54 @@ async function redeemByCodeAtomic(scannedCode: string, merchantDbId: string) {
           OR (SELECT redeemed_count FROM rc) < (SELECT max_redemptions FROM d)
         )
         AND (
-          (SELECT merchant_id FROM d) = ${merchantDbId}::uuid
+          (SELECT merchant_id FROM d) = ${merchantId}::uuid
         )
-      RETURNING "id" AS updated_id, "redeemedAt" AS updated_redeemed_at
+      RETURNING "id" as updated_id, "redeemedAt" as updated_redeemed_at
     )
     SELECT
-      (SELECT "id" FROM r)                  AS found_id,
-      (SELECT deal_id FROM r)              AS deal_id,
-      (SELECT prior_redeemed_at FROM r)    AS prior_redeemed_at,
-      (SELECT expires_at FROM r)           AS expires_at,
-      (SELECT max_redemptions FROM d)      AS max_redemptions,
-      (SELECT redeemed_count FROM rc)      AS redeemed_count,
-      (SELECT updated_id FROM upd)         AS updated_id,
-      (SELECT updated_redeemed_at FROM upd) AS updated_redeemed_at,
-      (SELECT merchant_id FROM d)          AS merchant_id
-  `);
+      (SELECT "id" FROM r) as found_id,
+      (SELECT deal_id FROM r) as deal_id,
+      (SELECT prior_redeemed_at FROM r) as prior_redeemed_at,
+      (SELECT expires_at FROM r) as expires_at,
+      (SELECT max_redemptions FROM d) as max_redemptions,
+      (SELECT redeemed_count FROM rc) as redeemed_count,
+      (SELECT updated_id FROM upd) as updated_id,
+      (SELECT updated_redeemed_at FROM upd) as updated_redeemed_at,
+      (SELECT merchant_id FROM d) as merchant_id
+  `;
 
   const row = rows?.[0];
 
   if (!row || !row.found_id) return { kind: "NOT_FOUND" as const };
+
+  // If no joined deal row, treat as not found
   if (!row.merchant_id) return { kind: "NOT_FOUND" as const };
 
-  // merchant mismatch
-  if (row.merchant_id !== merchantDbId) return { kind: "FORBIDDEN" as const };
+  // Merchant mismatch?
+  if (row.merchant_id !== merchantId) return { kind: "FORBIDDEN" as const };
 
-  // expired
+  // Expired?
   if (row.expires_at && row.expires_at <= now) {
     await clearActiveKeyIfAny(row.found_id);
     return { kind: "EXPIRED" as const };
   }
 
-  // already redeemed
+  // Already redeemed?
   if (row.prior_redeemed_at) {
-    return { kind: "ALREADY_REDEEMED" as const, redeemedAt: row.prior_redeemed_at };
+    return {
+      kind: "ALREADY_REDEEMED" as const,
+      redeemedAt: row.prior_redeemed_at,
+    };
   }
 
-  // not updated => sold out or conflict
+  // Not updated => sold out OR conflict
   if (!row.updated_id) {
     const max = row.max_redemptions;
     const redeemed = row.redeemed_count ?? 0;
-    if (typeof max === "number" && max > 0 && redeemed >= max) return { kind: "SOLD_OUT" as const };
+
+    if (typeof max === "number" && max > 0 && redeemed >= max) {
+      return { kind: "SOLD_OUT" as const };
+    }
     return { kind: "CONFLICT" as const };
   }
 
@@ -159,7 +170,7 @@ async function redeemByCodeAtomic(scannedCode: string, merchantDbId: string) {
  */
 async function redeemLegacyPayloadAtomic(
   legacy: LegacyDealQrPayload,
-  merchantDbId: string
+  merchantId: string
 ) {
   const now = new Date();
 
@@ -167,9 +178,9 @@ async function redeemLegacyPayloadAtomic(
     return { kind: "BAD" as const, error: "Invalid deal id" };
   }
 
-  // ensure deal belongs to merchant (Deal.merchantId === merchant.id)
+  // ✅ Make sure the deal belongs to this merchant (Merchant.id)
   const owns = await prisma.deal.findFirst({
-    where: { id: legacy.dealId, merchantId: merchantDbId },
+    where: { id: legacy.dealId, merchantId },
     select: { id: true },
   });
   if (!owns) return { kind: "FORBIDDEN" as const };
@@ -181,8 +192,10 @@ async function redeemLegacyPayloadAtomic(
     if (exp <= now) return { kind: "EXPIRED" as const };
   }
 
+  // Create a redemption row quickly then redeem via atomic logic.
   for (let attempt = 0; attempt < 5; attempt++) {
     const shortCode = attempt < 4 ? makeShortCode(6) : makeShortCode(8);
+
     try {
       await prisma.redemption.create({
         data: {
@@ -198,9 +211,9 @@ async function redeemLegacyPayloadAtomic(
         select: { id: true },
       });
 
-      return await redeemByCodeAtomic(shortCode, merchantDbId);
+      return await redeemByCodeAtomic(shortCode, merchantId);
     } catch (e: any) {
-      if (e?.code === "P2002") continue;
+      if (e?.code === "P2002") continue; // unique shortCode collision
       throw e;
     }
   }
@@ -217,10 +230,13 @@ export async function POST(req: NextRequest) {
     } = await supabase.auth.getUser();
 
     if (!user) {
-      return NextResponse.json({ ok: false, error: "Not authenticated" }, { status: 401 });
+      return NextResponse.json(
+        { ok: false, error: "Not authenticated" },
+        { status: 401 }
+      );
     }
 
-    // ✅ map Supabase user -> Merchant record
+    // ✅ Map Supabase user -> Merchant.id (THIS is what Deal.merchantId stores)
     const merchant = await prisma.merchant.findUnique({
       where: { userId: user.id },
       select: { id: true },
@@ -228,12 +244,12 @@ export async function POST(req: NextRequest) {
 
     if (!merchant) {
       return NextResponse.json(
-        { ok: false, error: "Not a merchant account" },
+        { ok: false, status: "FORBIDDEN", error: "Merchant profile not found." },
         { status: 403 }
       );
     }
 
-    const merchantDbId = merchant.id;
+    const merchantId = merchant.id;
 
     const bodyText = await req.text();
     if (!bodyText) {
@@ -264,44 +280,72 @@ export async function POST(req: NextRequest) {
     // Legacy JSON
     if (scanned.startsWith("{") && scanned.endsWith("}")) {
       let legacy: LegacyDealQrPayload;
+
       try {
         legacy = JSON.parse(scanned);
       } catch {
-        return NextResponse.json({ error: "QR code is not a valid deal code" }, { status: 400 });
+        return NextResponse.json(
+          { error: "QR code is not a valid deal code" },
+          { status: 400 }
+        );
       }
 
       if (legacy.type !== "DEAL" || !legacy.dealId) {
-        return NextResponse.json({ error: "QR code is not a valid deal code" }, { status: 400 });
+        return NextResponse.json(
+          { error: "QR code is not a valid deal code" },
+          { status: 400 }
+        );
       }
 
-      const out = await redeemLegacyPayloadAtomic(legacy, merchantDbId);
+      const out = await redeemLegacyPayloadAtomic(legacy, merchantId);
 
       if (out.kind === "FORBIDDEN") {
         return NextResponse.json(
-          { ok: false, status: "FORBIDDEN", error: "You cannot redeem another merchant’s deal." },
+          {
+            ok: false,
+            status: "FORBIDDEN",
+            error: "You cannot redeem another merchant’s deal.",
+          },
           { status: 403 }
         );
       }
       if (out.kind === "BAD") {
-        return NextResponse.json({ ok: false, status: "BAD_QR", error: out.error }, { status: 400 });
+        return NextResponse.json(
+          { ok: false, status: "BAD_QR", error: out.error },
+          { status: 400 }
+        );
       }
       if (out.kind === "NOT_FOUND") {
         return NextResponse.json({ error: "Redemption code not found" }, { status: 404 });
       }
       if (out.kind === "EXPIRED") {
-        return NextResponse.json({ ok: false, status: "EXPIRED", error: "This QR code has expired." }, { status: 410 });
+        return NextResponse.json(
+          { ok: false, status: "EXPIRED", error: "This QR code has expired." },
+          { status: 410 }
+        );
       }
       if (out.kind === "ALREADY_REDEEMED") {
         return NextResponse.json(
-          { ok: false, status: "ALREADY_REDEEMED", error: "This QR code has already been redeemed.", redeemedAt: out.redeemedAt },
+          {
+            ok: false,
+            status: "ALREADY_REDEEMED",
+            error: "This QR code has already been redeemed.",
+            redeemedAt: out.redeemedAt,
+          },
           { status: 409 }
         );
       }
       if (out.kind === "SOLD_OUT") {
-        return NextResponse.json({ ok: false, status: "SOLD_OUT", error: "This deal has been fully redeemed." }, { status: 409 });
+        return NextResponse.json(
+          { ok: false, status: "SOLD_OUT", error: "This deal has been fully redeemed." },
+          { status: 409 }
+        );
       }
       if (out.kind === "CONFLICT") {
-        return NextResponse.json({ ok: false, status: "CONFLICT", error: "Could not redeem. Please try again." }, { status: 409 });
+        return NextResponse.json(
+          { ok: false, status: "CONFLICT", error: "Could not redeem. Please try again." },
+          { status: 409 }
+        );
       }
 
       return NextResponse.json(
@@ -316,7 +360,7 @@ export async function POST(req: NextRequest) {
     }
 
     // Normal (shortCode / URL)
-    const out = await redeemByCodeAtomic(scanned, merchantDbId);
+    const out = await redeemByCodeAtomic(scanned, merchantId);
 
     if (out.kind === "FORBIDDEN") {
       return NextResponse.json(
@@ -328,19 +372,33 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Redemption code not found" }, { status: 404 });
     }
     if (out.kind === "EXPIRED") {
-      return NextResponse.json({ ok: false, status: "EXPIRED", error: "This QR code has expired." }, { status: 410 });
+      return NextResponse.json(
+        { ok: false, status: "EXPIRED", error: "This QR code has expired." },
+        { status: 410 }
+      );
     }
     if (out.kind === "ALREADY_REDEEMED") {
       return NextResponse.json(
-        { ok: false, status: "ALREADY_REDEEMED", error: "This QR code has already been redeemed.", redeemedAt: out.redeemedAt },
+        {
+          ok: false,
+          status: "ALREADY_REDEEMED",
+          error: "This QR code has already been redeemed.",
+          redeemedAt: out.redeemedAt,
+        },
         { status: 409 }
       );
     }
     if (out.kind === "SOLD_OUT") {
-      return NextResponse.json({ ok: false, status: "SOLD_OUT", error: "This deal has been fully redeemed." }, { status: 409 });
+      return NextResponse.json(
+        { ok: false, status: "SOLD_OUT", error: "This deal has been fully redeemed." },
+        { status: 409 }
+      );
     }
     if (out.kind === "CONFLICT") {
-      return NextResponse.json({ ok: false, status: "CONFLICT", error: "Could not redeem. Please try again." }, { status: 409 });
+      return NextResponse.json(
+        { ok: false, status: "CONFLICT", error: "Could not redeem. Please try again." },
+        { status: 409 }
+      );
     }
 
     return NextResponse.json(
