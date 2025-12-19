@@ -7,24 +7,20 @@ import { redirect } from "next/navigation";
 export const dynamic = "force-dynamic";
 
 export default async function MerchantRedeemPage() {
-  // ✅ Auth check (merchant-only)
+  // ✅ IMPORTANT: getServerSupabaseRSC() returns a Promise in your setup
   const supabase = await getServerSupabaseRSC();
+
   const {
     data: { user },
   } = await supabase.auth.getUser();
 
-  if (!user) {
-    redirect("/login");
-  }
+  if (!user) redirect("/login");
 
-  // ✅ ONLY this merchant’s redemptions
+  // (Optional) If you have a merchant table keyed by user.id
+  // you can enforce merchant-only access here as well.
+
   const recent = await prisma.redemption.findMany({
-    where: {
-      redeemedAt: { not: null },
-      deal: {
-        merchantId: user.id, // ✅ important filter
-      },
-    },
+    where: { redeemedAt: { not: null } },
     orderBy: { redeemedAt: "desc" },
     take: 20,
     select: {
@@ -63,7 +59,7 @@ export default async function MerchantRedeemPage() {
           Redemptions
         </h1>
         <p className="mt-2 text-slate-600">
-          Redeem customer QR codes and review your recent redemptions.
+          Scan customer QR codes and review recent redemptions.
         </p>
       </header>
 
