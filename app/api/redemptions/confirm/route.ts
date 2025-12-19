@@ -14,7 +14,9 @@ function makeShortCode(len = 6) {
 }
 
 function isUuid(v: string) {
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v);
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+    v
+  );
 }
 
 function extractCode(rawText: string): string | null {
@@ -50,6 +52,10 @@ async function clearActiveKeyIfAny(redemptionId: string) {
 /**
  * ✅ Atomic redeem by shortCode/code in ONE SQL call (no interactive transaction).
  * ✅ Merchant-locked: only redeem if deal.merchantId === merchantId
+ *
+ * IMPORTANT:
+ * Your DB currently behaves like Deal.id is UUID and Redemption.dealId is TEXT (or vice versa).
+ * So we CAST explicitly to avoid "uuid = text" errors.
  */
 async function redeemByCodeAtomic(scannedCode: string, merchantId: string) {
   const now = new Date();
@@ -81,12 +87,12 @@ async function redeemByCodeAtomic(scannedCode: string, merchantId: string) {
              "maxRedemptions" as max_redemptions,
              "merchantId" as merchant_id
       FROM "Deal"
-      WHERE "id" = (SELECT deal_id FROM r)
+      WHERE "id" = CAST((SELECT deal_id FROM r) AS uuid)   -- ✅ FIX uuid=text
     ),
     rc AS (
       SELECT COUNT(*)::int as redeemed_count
       FROM "Redemption"
-      WHERE "dealId" = (SELECT deal_id FROM r)
+      WHERE "dealId" = (SELECT deal_id FROM r)             -- ✅ keep same type as Redemption.dealId
         AND "redeemedAt" IS NOT NULL
     ),
     upd AS (
@@ -104,7 +110,7 @@ async function redeemByCodeAtomic(scannedCode: string, merchantId: string) {
           OR (SELECT redeemed_count FROM rc) < (SELECT max_redemptions FROM d)
         )
         AND (
-          (SELECT merchant_id FROM d) = ${merchantId}  -- ✅ merchant-only lock
+          (SELECT merchant_id FROM d) = CAST(${merchantId} AS uuid)  -- ✅ FIX uuid=text
         )
       RETURNING "id" as updated_id, "redeemedAt" as updated_redeemed_at
     )
@@ -126,7 +132,13 @@ async function redeemByCodeAtomic(scannedCode: string, merchantId: string) {
     return { kind: "NOT_FOUND" as const };
   }
 
+  // If deal didn't resolve (bad dealId cast / missing deal), treat as not found
+  if (!row.deal_id || !row.merchant_id) {
+    return { kind: "NOT_FOUND" as const };
+  }
+
   // Merchant mismatch?
+  // (merchant_id from SQL might be string uuid; merchantId is string uuid)
   if (row.merchant_id !== merchantId) {
     return { kind: "FORBIDDEN" as const };
   }
@@ -157,7 +169,7 @@ async function redeemByCodeAtomic(scannedCode: string, merchantId: string) {
     kind: "REDEEMED" as const,
     redemptionId: row.updated_id,
     redeemedAt: row.updated_redeemed_at!,
-    dealId: row.deal_id!,
+    dealId: row.deal_id,
   };
 }
 
@@ -272,7 +284,10 @@ export async function POST(req: NextRequest) {
       const out = await redeemLegacyPayloadAtomic(legacy, user.id);
 
       if (out.kind === "FORBIDDEN") {
-        return NextResponse.json({ ok: false, status: "FORBIDDEN", error: "You cannot redeem another merchant’s deal." }, { status: 403 });
+        return NextResponse.json(
+          { ok: false, status: "FORBIDDEN", error: "You cannot redeem another merchant’s deal." },
+          { status: 403 }
+        );
       }
       if (out.kind === "BAD") {
         return NextResponse.json({ ok: false, status: "BAD_QR", error: out.error }, { status: 400 });
@@ -285,7 +300,12 @@ export async function POST(req: NextRequest) {
       }
       if (out.kind === "ALREADY_REDEEMED") {
         return NextResponse.json(
-          { ok: false, status: "ALREADY_REDEEMED", error: "This QR code has already been redeemed.", redeemedAt: out.redeemedAt },
+          {
+            ok: false,
+            status: "ALREADY_REDEEMED",
+            error: "This QR code has already been redeemed.",
+            redeemedAt: out.redeemedAt,
+          },
           { status: 409 }
         );
       }
@@ -311,7 +331,10 @@ export async function POST(req: NextRequest) {
     const out = await redeemByCodeAtomic(scanned, user.id);
 
     if (out.kind === "FORBIDDEN") {
-      return NextResponse.json({ ok: false, status: "FORBIDDEN", error: "You cannot redeem another merchant’s deal." }, { status: 403 });
+      return NextResponse.json(
+        { ok: false, status: "FORBIDDEN", error: "You cannot redeem another merchant’s deal." },
+        { status: 403 }
+      );
     }
     if (out.kind === "NOT_FOUND") {
       return NextResponse.json({ error: "Redemption code not found" }, { status: 404 });
@@ -321,7 +344,12 @@ export async function POST(req: NextRequest) {
     }
     if (out.kind === "ALREADY_REDEEMED") {
       return NextResponse.json(
-        { ok: false, status: "ALREADY_REDEEMED", error: "This QR code has already been redeemed.", redeemedAt: out.redeemedAt },
+        {
+          ok: false,
+          status: "ALREADY_REDEEMED",
+          error: "This QR code has already been redeemed.",
+          redeemedAt: out.redeemedAt,
+        },
         { status: 409 }
       );
     }
