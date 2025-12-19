@@ -16,11 +16,19 @@ export default async function MerchantRedeemPage() {
 
   if (!user) redirect("/login");
 
-  // (Optional) If you have a merchant table keyed by user.id
-  // you can enforce merchant-only access here as well.
-
+  /**
+   * ✅ Merchant-only filter:
+   * Only show redemptions where the redeemed deal belongs to this merchant user.
+   *
+   * Assumption (based on your app): Deal has merchantId and merchant user id matches it.
+   */
   const recent = await prisma.redemption.findMany({
-    where: { redeemedAt: { not: null } },
+    where: {
+      redeemedAt: { not: null },
+      deal: {
+        merchantId: user.id,
+      },
+    },
     orderBy: { redeemedAt: "desc" },
     take: 20,
     select: {
@@ -56,10 +64,10 @@ export default async function MerchantRedeemPage() {
     <main className="mx-auto max-w-5xl px-4 py-10">
       <header className="mb-8">
         <h1 className="text-4xl font-semibold tracking-tight text-slate-900">
-          Redemptions
+          Redeem
         </h1>
         <p className="mt-2 text-slate-600">
-          Scan customer QR codes and review recent redemptions.
+          Scan customer QR codes and review your recent redemptions.
         </p>
       </header>
 
