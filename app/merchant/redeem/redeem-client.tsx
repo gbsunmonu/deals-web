@@ -1,6 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import QrScanner from "@/components/merchant/QrScanner";
 
 export type RecentRedemptionRow = {
   id: string;
@@ -19,7 +20,7 @@ type ConfirmOk = {
   ok: true;
   status: "REDEEMED";
   message?: string;
-  redemption?: { id: string; redeemedAt: string | Date };
+  redemption?: { id: string; redeemedAt: string };
   deal?: { id: string; title: string };
   merchant?: {
     id: string;
@@ -30,46 +31,39 @@ type ConfirmOk = {
   };
 };
 
-type ConfirmBad = {
-  ok: false;
-  status?: string;
-  error: string;
-  redeemedAt?: string | Date;
-};
-
-type ConfirmWeird = {
+type ConfirmErr = {
+  ok?: false;
+  status?: "EXPIRED" | "SOLD_OUT" | "ALREADY_REDEEMED" | "CONFLICT" | "BAD_QR";
   error?: string;
-  details?: string;
-  message?: string;
+  redeemedAt?: string;
 };
 
-type ConfirmResponse = ConfirmOk | ConfirmBad | ConfirmWeird;
+type ConfirmResponse = ConfirmOk | ConfirmErr;
 
-function fmtDateTime(iso: string | null) {
-  if (!iso) return "—";
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return String(iso);
-  return d.toLocaleString("en-GB", {
-    day: "2-digit",
-    month: "short",
-    year: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
+function extractCode(raw: string) {
+  const t = String(raw || "").trim();
+  if (!t) return "";
+  if (/^https?:\/\//i.test(t)) {
+    try {
+      const u = new URL(t);
+      const parts = u.pathname.split("/").filter(Boolean);
+      return parts.length ? parts[parts.length - 1] : t;
+    } catch {
+      return t;
+    }
+  }
+  return t;
 }
 
 function formatMoneyNGN(n: number) {
   return `₦${n.toLocaleString("en-NG")}`;
 }
 
-function estSave(row: RecentRedemptionRow) {
-  const isPercent =
-    row.deal.discountType === "PERCENT" || row.deal.discountType === "PERCENTAGE";
-  if (!isPercent) return null;
-  if (typeof row.deal.originalPrice !== "number") return null;
-  const pct = Number(row.deal.discountValue || 0);
-  if (!Number.isFinite(pct) || pct <= 0) return null;
-  return Math.round((row.deal.originalPrice * pct) / 100);
+function fmtDiscount(deal: RecentRedemptionRow["deal"]) {
+  const v = Number(deal.discountValue ?? 0);
+  if (!v) return "";
+  if (String(deal.discountType).toUpperCase().includes("PERCENT")) return `${v}% off`;
+  return `${v}`;
 }
 
 export default function RedeemClient({
@@ -77,270 +71,234 @@ export default function RedeemClient({
 }: {
   initialRecent: RecentRedemptionRow[];
 }) {
-  const [text, setText] = useState("");
-  const [loading, setLoading] = useState(false);
+  const [input, setInput] = useState("");
+  const [submitting, setSubmitting] = useState(false);
 
-  const [result, setResult] = useState<ConfirmOk | ConfirmBad | null>(null);
+  const [result, setResult] = useState<ConfirmResponse | null>(null);
+  const [lastScannedRaw, setLastScannedRaw] = useState<string>("");
 
-  const [recent, setRecent] = useState<RecentRedemptionRow[]>(initialRecent);
+  const [recent, setRecent] = useState<RecentRedemptionRow[]>(initialRecent || []);
 
-  const normalizedError = useMemo(() => {
+  const statusTone = useMemo(() => {
     if (!result) return null;
-    if ("ok" in result && result.ok === false) return result.error;
-    return null;
+    return (result as any).ok ? "success" : "error";
   }, [result]);
 
-  const normalizedOk = useMemo(() => {
-    if (!result) return null;
-    if ("ok" in result && result.ok === true) return result;
-    return null;
-  }, [result]);
+  async function confirmRedeem(rawText: string) {
+    const code = extractCode(rawText);
+    if (!code) return;
 
-  function reset() {
-    setText("");
-    setResult(null);
-  }
-
-  async function onRedeem() {
-    const qrText = text.trim();
-    if (!qrText) return;
-
-    setLoading(true);
+    setSubmitting(true);
     setResult(null);
 
     try {
       const res = await fetch("/api/redemptions/confirm", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        // Your confirm route supports either raw string or JSON containing qrText/payload/etc.
-        body: JSON.stringify({ qrText }),
-        cache: "no-store",
+        body: JSON.stringify({ qrText: code }),
       });
 
-      const data: ConfirmResponse = await res.json().catch(() => ({}));
+      const data = (await res.json().catch(() => ({}))) as ConfirmResponse;
 
-      // Success
-      if ((data as any)?.ok === true) {
-        const ok = data as ConfirmOk;
-        setResult(ok);
-
-        // best-effort: push into recent list
-        const redeemedAt =
-          ok.redemption?.redeemedAt instanceof Date
-            ? ok.redemption.redeemedAt.toISOString()
-            : typeof ok.redemption?.redeemedAt === "string"
-            ? ok.redemption.redeemedAt
-            : new Date().toISOString();
-
-        const dealTitle = ok.deal?.title ?? "(Deal)";
-        const dealId = ok.deal?.id ?? "unknown";
-
-        setRecent((prev) => {
-          const next: RecentRedemptionRow[] = [
-            {
-              id: ok.redemption?.id ?? crypto.randomUUID(),
-              redeemedAt,
-              shortCode: null,
-              deal: {
-                id: dealId,
-                title: dealTitle,
-                discountType: "",
-                discountValue: 0,
-                originalPrice: null,
-              },
-            },
-            ...prev,
-          ];
-          return next.slice(0, 20);
-        });
-
-        // Clear input after success to prevent double paste
-        setText("");
-        return;
+      // normalize error message
+      if (!res.ok && !(data as any).error) {
+        (data as any).error = "Redemption failed. Please try again.";
       }
 
-      // Error (normalized)
-      const errMsg =
-        (data as any)?.error ||
-        (data as any)?.details ||
-        (data as any)?.message ||
-        "Could not confirm redemption.";
+      setResult(data);
 
-      setResult({ ok: false, error: String(errMsg) });
+      // ✅ Optimistic “Recent” update when success
+      if ((data as any).ok && data.status === "REDEEMED" && data.redemption?.id) {
+        const newRow: RecentRedemptionRow = {
+          id: data.redemption.id,
+          redeemedAt: data.redemption.redeemedAt ?? new Date().toISOString(),
+          shortCode: code.length <= 12 ? code : null, // best effort (if it was a shortCode)
+          deal: {
+            id: data.deal?.id || "unknown",
+            title: data.deal?.title || "Redeemed deal",
+            discountType: "PERCENT",
+            discountValue: 0,
+            originalPrice: null,
+          },
+        };
+
+        setRecent((prev) => {
+          // avoid duplicates
+          if (prev.some((r) => r.id === newRow.id)) return prev;
+          return [newRow, ...prev].slice(0, 20);
+        });
+      }
     } catch (e: any) {
-      setResult({
-        ok: false,
-        error: e?.message || "Network error confirming redemption.",
-      });
+      setResult({ ok: false, error: e?.message || "Network error" });
     } finally {
-      setLoading(false);
+      setSubmitting(false);
     }
   }
 
+  function onScan(raw: string) {
+    setLastScannedRaw(raw);
+    confirmRedeem(raw);
+  }
+
   return (
-    <div className="grid gap-6 lg:grid-cols-[1.1fr_0.9fr]">
-      {/* LEFT: Redeem box + big status */}
-      <section className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
-        <h2 className="text-lg font-semibold text-slate-900">
-          Redeem customer QR
-        </h2>
-        <p className="mt-1 text-sm text-slate-600">
-          Paste the scanned QR text / link / short code and redeem it.
+    <div className="space-y-6">
+      <header>
+        <h1 className="text-2xl font-semibold text-slate-900">Merchant Redeem</h1>
+        <p className="mt-1 text-sm text-slate-500">
+          Scan the customer QR or paste the code. The QR is valid for 15 minutes.
+        </p>
+      </header>
+
+      {/* Camera Scanner */}
+      <QrScanner
+        onResult={onScan}
+        onError={(msg) => setResult({ ok: false, error: msg })}
+        paused={submitting}
+        dedupeMs={1500}
+      />
+
+      {/* Manual fallback */}
+      <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+        <p className="text-sm font-semibold text-slate-900">Manual Redeem</p>
+        <p className="mt-1 text-xs text-slate-500">
+          Paste a short code (e.g. ABC123) or a redeem link.
         </p>
 
-        <textarea
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-          placeholder="Paste QR text / link / short code here…"
-          className="mt-4 w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-200"
-          rows={4}
-        />
-
-        <div className="mt-3 flex flex-wrap gap-2">
-          <button
-            onClick={onRedeem}
-            disabled={loading || !text.trim()}
-            className={[
-              "rounded-full px-5 py-2 text-sm font-semibold shadow-sm transition",
-              loading || !text.trim()
-                ? "bg-slate-200 text-slate-500"
-                : "bg-slate-900 text-white hover:bg-black",
-            ].join(" ")}
-          >
-            {loading ? "Redeeming…" : "Redeem"}
-          </button>
-
+        <div className="mt-3 flex gap-2">
+          <input
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            placeholder="Paste short code or redeem URL…"
+            className="flex-1 rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-900 placeholder:text-slate-400 focus:border-emerald-500 focus:outline-none focus:ring-1 focus:ring-emerald-500"
+          />
           <button
             type="button"
-            onClick={reset}
-            disabled={loading && !result}
-            className="rounded-full border border-slate-200 px-5 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50"
+            onClick={() => confirmRedeem(input)}
+            disabled={submitting || !input.trim()}
+            className={[
+              "rounded-full px-4 py-2 text-sm font-semibold shadow-sm transition",
+              submitting || !input.trim()
+                ? "bg-slate-200 text-slate-500 cursor-not-allowed"
+                : "bg-emerald-600 text-white hover:bg-emerald-700",
+            ].join(" ")}
           >
-            Clear
+            {submitting ? "Checking…" : "Redeem"}
           </button>
         </div>
 
-        {/* BIG CONFIRMATION */}
-        {normalizedOk && (
-          <div className="mt-5 rounded-3xl border border-emerald-200 bg-emerald-50 p-5">
-            <div className="flex items-start gap-4">
-              <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-emerald-600 text-3xl text-white">
-                ✓
-              </div>
-              <div className="flex-1">
-                <div className="text-lg font-semibold text-emerald-900">
-                  Redeemed successfully
-                </div>
-                <div className="mt-1 text-sm text-emerald-900/70">
-                  {normalizedOk.deal?.title ? (
-                    <>
-                      Deal:{" "}
-                      <span className="font-semibold">
-                        {normalizedOk.deal.title}
-                      </span>
-                    </>
-                  ) : (
-                    "Deal redeemed."
-                  )}
-                </div>
-                {normalizedOk.redemption?.redeemedAt && (
-                  <div className="mt-1 text-sm text-emerald-900/70">
-                    Time:{" "}
-                    <span className="font-medium">
-                      {fmtDateTime(
-                        typeof normalizedOk.redemption.redeemedAt === "string"
-                          ? normalizedOk.redemption.redeemedAt
-                          : normalizedOk.redemption.redeemedAt.toISOString()
-                      )}
-                    </span>
-                  </div>
-                )}
-              </div>
-            </div>
-          </div>
-        )}
-
-        {normalizedError && (
-          <div className="mt-5 rounded-3xl border border-red-200 bg-red-50 p-5">
-            <div className="flex items-start gap-4">
-              <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-red-600 text-3xl text-white">
-                ✗
-              </div>
-              <div className="flex-1">
-                <div className="text-lg font-semibold text-red-900">
-                  Redemption failed
-                </div>
-                <div className="mt-1 text-sm text-red-900/80">
-                  {normalizedError}
-                </div>
-              </div>
-            </div>
-          </div>
+        {lastScannedRaw && (
+          <p className="mt-2 text-[11px] text-slate-500 break-all">
+            Last scan: <span className="font-mono">{lastScannedRaw}</span>
+          </p>
         )}
       </section>
 
-      {/* RIGHT: Recent redemptions */}
-      <section className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
-        <h2 className="text-lg font-semibold text-slate-900">
-          Recent redemptions
-        </h2>
-        <p className="mt-1 text-sm text-slate-600">
-          Latest 20 successful redemptions.
-        </p>
+      {/* Result UI */}
+      {result && (
+        <section
+          className={[
+            "rounded-2xl border p-5 shadow-sm",
+            statusTone === "success"
+              ? "border-emerald-200 bg-emerald-50"
+              : "border-red-200 bg-red-50",
+          ].join(" ")}
+        >
+          {(result as any).ok ? (
+            <div className="flex items-start gap-3">
+              <div className="grid h-10 w-10 place-items-center rounded-full bg-emerald-600 text-white text-xl">
+                ✓
+              </div>
+              <div>
+                <p className="text-base font-semibold text-emerald-900">
+                  Redeemed successfully
+                </p>
+                <p className="mt-1 text-sm text-emerald-900/70">
+                  {(result as any).message ||
+                    "This code is now used and cannot be redeemed again."}
+                </p>
+                {(result as any).redemption?.redeemedAt && (
+                  <p className="mt-2 text-[11px] text-emerald-900/60">
+                    Time:{" "}
+                    {new Date((result as any).redemption.redeemedAt).toLocaleString()}
+                  </p>
+                )}
+              </div>
+            </div>
+          ) : (
+            <div className="flex items-start gap-3">
+              <div className="grid h-10 w-10 place-items-center rounded-full bg-red-600 text-white text-xl">
+                ✗
+              </div>
+              <div>
+                <p className="text-base font-semibold text-red-900">Redemption failed</p>
+                <p className="mt-1 text-sm text-red-900/70">
+                  {(result as any).error || "This code can’t be redeemed."}
+                </p>
 
-        <div className="mt-4 overflow-x-auto">
-          <table className="min-w-full text-left text-sm">
-            <thead>
-              <tr className="border-b border-slate-200 text-slate-500">
-                <th className="py-2 pr-4 font-semibold">Date</th>
-                <th className="py-2 pr-4 font-semibold">Deal</th>
-                <th className="py-2 pr-4 font-semibold">Discount</th>
-                <th className="py-2 pr-4 font-semibold">Original price</th>
-                <th className="py-2 pr-0 font-semibold">Est save</th>
-              </tr>
-            </thead>
-            <tbody>
-              {recent.length === 0 ? (
-                <tr>
-                  <td className="py-4 text-slate-500" colSpan={5}>
-                    No redemptions yet.
-                  </td>
-                </tr>
-              ) : (
-                recent.map((r) => {
-                  const save = estSave(r);
-                  const pct =
-                    r.deal.discountValue && r.deal.discountValue > 0
-                      ? `${Math.round(r.deal.discountValue)}%`
-                      : "—";
-                  const orig =
-                    typeof r.deal.originalPrice === "number"
-                      ? formatMoneyNGN(r.deal.originalPrice)
-                      : "—";
+                {(result as any).status && (
+                  <p className="mt-2 text-[11px] text-red-900/60">
+                    Status: {(result as any).status}
+                  </p>
+                )}
 
-                  return (
-                    <tr key={r.id} className="border-b border-slate-100">
-                      <td className="py-3 pr-4 text-slate-700">
-                        {fmtDateTime(r.redeemedAt)}
-                      </td>
-                      <td className="py-3 pr-4 text-slate-900">
-                        <div className="font-medium">{r.deal.title}</div>
-                        <div className="text-xs text-slate-500">
-                          ID: {r.deal.id}
-                        </div>
-                      </td>
-                      <td className="py-3 pr-4 text-slate-700">{pct}</td>
-                      <td className="py-3 pr-4 text-slate-700">{orig}</td>
-                      <td className="py-3 pr-0 text-slate-700">
-                        {save != null ? formatMoneyNGN(save) : "—"}
-                      </td>
-                    </tr>
-                  );
-                })
-              )}
-            </tbody>
-          </table>
+                {(result as any).redeemedAt && (
+                  <p className="mt-2 text-[11px] text-red-900/60">
+                    Redeemed at: {new Date((result as any).redeemedAt).toLocaleString()}
+                  </p>
+                )}
+              </div>
+            </div>
+          )}
+        </section>
+      )}
+
+      {/* Recent Redemptions */}
+      <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+        <div className="flex items-center justify-between">
+          <p className="text-sm font-semibold text-slate-900">Recent redemptions</p>
+          <p className="text-xs text-slate-500">{recent.length} shown</p>
         </div>
+
+        {recent.length === 0 ? (
+          <p className="mt-3 text-sm text-slate-500">No redemptions yet.</p>
+        ) : (
+          <div className="mt-3 divide-y divide-slate-100">
+            {recent.map((r) => (
+              <div key={r.id} className="py-3">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <p className="text-sm font-semibold text-slate-900">
+                      {r.deal.title}
+                    </p>
+                    <p className="mt-0.5 text-[11px] text-slate-500">
+                      {r.redeemedAt ? new Date(r.redeemedAt).toLocaleString() : "—"}
+                      {r.shortCode ? (
+                        <>
+                          {" "}
+                          · <span className="font-mono">{r.shortCode}</span>
+                        </>
+                      ) : null}
+                    </p>
+                  </div>
+
+                  <div className="text-right">
+                    {fmtDiscount(r.deal) ? (
+                      <span className="rounded-full bg-slate-100 px-2 py-1 text-[11px] font-semibold text-slate-700">
+                        {fmtDiscount(r.deal)}
+                      </span>
+                    ) : null}
+
+                    {typeof r.deal.originalPrice === "number" ? (
+                      <p className="mt-1 text-[11px] text-slate-500">
+                        {formatMoneyNGN(r.deal.originalPrice)}
+                      </p>
+                    ) : null}
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
       </section>
     </div>
   );
