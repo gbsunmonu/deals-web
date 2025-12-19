@@ -1,40 +1,67 @@
-import { NextRequest, NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
+// app/api/merchant/redemptions/route.ts
+import { NextResponse } from "next/server";
+import { prisma } from "@/lib/prisma";
+import { getServerSupabaseRSC } from "@/lib/supabase";
 
-const admin = createClient(process.env.SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!);
+export const dynamic = "force-dynamic";
 
-export async function POST(req: NextRequest) {
+export async function GET() {
   try {
-    const { merchantId, merchantPin, status, start, end, page = 1, pageSize = 20 } = await req.json();
-    if (!merchantId || !merchantPin) return NextResponse.json({ error: "Auth required" }, { status: 400 });
+    const supabase = await getServerSupabaseRSC();
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
 
-    // auth
-    const { data: merchant } = await admin
-      .from("merchants")
-      .select("id, merchant_pin")
-      .eq("id", merchantId)
-      .single();
-    if (!merchant || merchant.merchant_pin !== merchantPin) return NextResponse.json({ error: "Invalid merchant PIN" }, { status: 401 });
+    if (!user) {
+      return NextResponse.json({ ok: false, error: "Not authenticated" }, { status: 401 });
+    }
 
-    const from = (page - 1) * pageSize;
-    const to = from + pageSize - 1;
+    const recent = await prisma.redemption.findMany({
+      where: {
+        redeemedAt: { not: null },
+        deal: { merchantId: user.id }, // ✅ merchant-only filter
+      },
+      orderBy: { redeemedAt: "desc" },
+      take: 50,
+      select: {
+        id: true,
+        redeemedAt: true,
+        shortCode: true,
+        deal: {
+          select: {
+            id: true,
+            title: true,
+            discountType: true,
+            discountValue: true,
+            originalPrice: true,
+          },
+        },
+      },
+    });
 
-    let q = admin
-      .from("redemptions")
-      .select("id, short_code, status, created_at, redeemed_at, deal_id", { count: "exact" })
-      .eq("merchant_id", merchantId)
-      .order("created_at", { ascending: false })
-      .range(from, to);
-
-    if (status) q = q.eq("status", status);
-    if (start) q = q.gte("created_at", new Date(start).toISOString());
-    if (end) q = q.lte("created_at", new Date(end).toISOString());
-
-    const { data, error, count } = await q;
-    if (error) throw error;
-
-    return NextResponse.json({ data, count, page, pageSize });
-  } catch (e:any) {
-    return NextResponse.json({ error: e.message || "Server error" }, { status: 500 });
+    return NextResponse.json(
+      {
+        ok: true,
+        rows: recent.map((r) => ({
+          id: r.id,
+          redeemedAt: r.redeemedAt ? r.redeemedAt.toISOString() : null,
+          shortCode: r.shortCode ?? null,
+          deal: {
+            id: r.deal.id,
+            title: r.deal.title,
+            discountType: r.deal.discountType,
+            discountValue: Number(r.deal.discountValue ?? 0),
+            originalPrice: r.deal.originalPrice ?? null,
+          },
+        })),
+      },
+      { status: 200 }
+    );
+  } catch (err: any) {
+    console.error("GET /api/merchant/redemptions error:", err);
+    return NextResponse.json(
+      { ok: false, error: "Unexpected error", details: err?.message ?? String(err) },
+      { status: 500 }
+    );
   }
 }
