@@ -93,3 +93,24 @@ model Redemption {
   @@index([dealId, redeemedAt])
   @@index([expiresAt])
 }
+model RedemptionBlockLog {
+  id           String   @id @default(uuid())
+
+  dealId       String?
+  merchantId   String?
+  deviceHash   String?
+
+  reason       String   // e.g. "ANTI_HOARDING", "COOLDOWN", "SOLD_OUT"
+  message      String?
+
+  blockedByDealId String?
+  blockedByCode   String?
+  blockedUntil    DateTime?
+
+  createdAt    DateTime @default(now())
+
+  @@index([merchantId])
+  @@index([dealId])
+  @@index([deviceHash])
+  @@index([createdAt])
+}
