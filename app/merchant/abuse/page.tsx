@@ -4,6 +4,7 @@ import { getServerSupabaseRSC } from "@/lib/supabase";
 import { redirect } from "next/navigation";
 
 export const dynamic = "force-dynamic";
+export const revalidate = 0;
 
 /**
  * Auto-flag thresholds (tune anytime)
@@ -172,8 +173,7 @@ export default async function MerchantAbusePage() {
     LEFT JOIN top_reason tr
       ON tr."device_hash" = a."device_hash"
     WHERE
-      (a.blocks_7d >= ${FLAG_LOW_BLOCKS_7D} OR a.blocks_24h >= 1)
-      AND (
+      (
         a.blocks_7d >= ${FLAG_LOW_BLOCKS_7D}
         OR a.blocks_24h >= 1
       )
@@ -284,28 +284,47 @@ export default async function MerchantAbusePage() {
           Abuse dashboard
         </h1>
         <p className="mt-2 text-slate-600">
-          Anti-hoarding blocks for <span className="font-semibold">{merchant.name}</span> (merchant-only).
+          Anti-hoarding blocks for{" "}
+          <span className="font-semibold">{merchant.name}</span> (merchant-only).
         </p>
       </header>
 
       {/* Summary cards */}
       <section className="grid gap-4 md:grid-cols-3">
         <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-          <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Last 24 hours</p>
-          <p className="mt-2 text-3xl font-semibold text-slate-900">{fmtInt(summary.blocks_24h)}</p>
-          <p className="mt-1 text-sm text-slate-600">{fmtInt(summary.devices_24h)} unique devices</p>
+          <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+            Last 24 hours
+          </p>
+          <p className="mt-2 text-3xl font-semibold text-slate-900">
+            {fmtInt(summary.blocks_24h)}
+          </p>
+          <p className="mt-1 text-sm text-slate-600">
+            {fmtInt(summary.devices_24h)} unique devices
+          </p>
         </div>
 
         <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-          <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Last 7 days</p>
-          <p className="mt-2 text-3xl font-semibold text-slate-900">{fmtInt(summary.blocks_7d)}</p>
-          <p className="mt-1 text-sm text-slate-600">{fmtInt(summary.devices_7d)} unique devices</p>
+          <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+            Last 7 days
+          </p>
+          <p className="mt-2 text-3xl font-semibold text-slate-900">
+            {fmtInt(summary.blocks_7d)}
+          </p>
+          <p className="mt-1 text-sm text-slate-600">
+            {fmtInt(summary.devices_7d)} unique devices
+          </p>
         </div>
 
         <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-          <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Last 30 days</p>
-          <p className="mt-2 text-3xl font-semibold text-slate-900">{fmtInt(summary.blocks_30d)}</p>
-          <p className="mt-1 text-sm text-slate-600">{fmtInt(summary.devices_30d)} unique devices</p>
+          <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+            Last 30 days
+          </p>
+          <p className="mt-2 text-3xl font-semibold text-slate-900">
+            {fmtInt(summary.blocks_30d)}
+          </p>
+          <p className="mt-1 text-sm text-slate-600">
+            {fmtInt(summary.devices_30d)} unique devices
+          </p>
         </div>
       </section>
 
@@ -313,18 +332,22 @@ export default async function MerchantAbusePage() {
       <section className="mt-6 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
         <div className="flex items-center justify-between">
           <div>
-            <p className="text-sm font-semibold text-slate-900">Auto-flagged devices</p>
+            <p className="text-sm font-semibold text-slate-900">
+              Auto-flagged devices
+            </p>
             <p className="mt-1 text-[11px] text-slate-500">
-              HIGH: ≥{FLAG_HIGH_BLOCKS_7D} blocks/7d or ≥{FLAG_HIGH_BLOCKS_24H} blocks/24h •
-              MEDIUM: ≥{FLAG_MEDIUM_BLOCKS_7D} blocks/7d •
-              LOW: ≥{FLAG_LOW_BLOCKS_7D} blocks/7d
+              HIGH: ≥{FLAG_HIGH_BLOCKS_7D} blocks/7d or ≥{FLAG_HIGH_BLOCKS_24H}{" "}
+              blocks/24h • MEDIUM: ≥{FLAG_MEDIUM_BLOCKS_7D} blocks/7d • LOW:
+              ≥{FLAG_LOW_BLOCKS_7D} blocks/7d
             </p>
           </div>
           <p className="text-[11px] text-slate-500">Top 25</p>
         </div>
 
         {flagged.length === 0 ? (
-          <p className="mt-3 text-sm text-slate-500">No devices meet the flag thresholds yet.</p>
+          <p className="mt-3 text-sm text-slate-500">
+            No devices meet the flag thresholds yet.
+          </p>
         ) : (
           <div className="mt-3 overflow-x-auto">
             <table className="w-full text-sm">
@@ -354,17 +377,26 @@ export default async function MerchantAbusePage() {
                     <td className="py-2 pr-3 font-mono text-slate-800 whitespace-nowrap">
                       {shortHash(d.device_hash)}
                     </td>
-                    <td className="py-2 pr-3 text-slate-700">{fmtInt(d.blocks_24h)}</td>
-                    <td className="py-2 pr-3 text-slate-700">{fmtInt(d.blocks_7d)}</td>
-                    <td className="py-2 pr-3 text-slate-700">{fmtInt(d.unique_deals_7d)}</td>
-                    <td className="py-2 pr-3 text-slate-700">{d.top_reason_7d || "—"}</td>
+                    <td className="py-2 pr-3 text-slate-700">
+                      {fmtInt(d.blocks_24h)}
+                    </td>
+                    <td className="py-2 pr-3 text-slate-700">
+                      {fmtInt(d.blocks_7d)}
+                    </td>
+                    <td className="py-2 pr-3 text-slate-700">
+                      {fmtInt(d.unique_deals_7d)}
+                    </td>
+                    <td className="py-2 pr-3 text-slate-700">
+                      {d.top_reason_7d || "—"}
+                    </td>
                   </tr>
                 ))}
               </tbody>
             </table>
 
             <p className="mt-3 text-[11px] text-slate-500">
-              Device hashes are truncated for display. Use Supabase SQL if you need the full hash.
+              Device hashes are truncated for display. Use Supabase SQL if you
+              need the full hash.
             </p>
           </div>
         )}
@@ -374,16 +406,22 @@ export default async function MerchantAbusePage() {
       <section className="mt-6 grid gap-4 lg:grid-cols-3">
         {/* Top reasons */}
         <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-          <p className="text-sm font-semibold text-slate-900">Top reasons (7d)</p>
+          <p className="text-sm font-semibold text-slate-900">
+            Top reasons (7d)
+          </p>
           <div className="mt-3 space-y-2">
             {topReasons.length === 0 ? (
-              <p className="text-sm text-slate-500">No blocks in the last 7 days.</p>
+              <p className="text-sm text-slate-500">
+                No blocks in the last 7 days.
+              </p>
             ) : (
               topReasons.map((r) => (
                 <div key={r.reason} className="flex items-center gap-3">
                   <div className="flex-1">
                     <div className="flex items-center justify-between text-xs text-slate-600">
-                      <span className="font-medium text-slate-800">{r.reason}</span>
+                      <span className="font-medium text-slate-800">
+                        {r.reason}
+                      </span>
                       <span>{fmtInt(r.count)}</span>
                     </div>
                     <div className="mt-1 h-2 w-full rounded-full bg-slate-100">
@@ -401,16 +439,22 @@ export default async function MerchantAbusePage() {
 
         {/* Top devices */}
         <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-          <p className="text-sm font-semibold text-slate-900">Top devices (7d)</p>
+          <p className="text-sm font-semibold text-slate-900">
+            Top devices (7d)
+          </p>
           <div className="mt-3 space-y-2">
             {topDevices.length === 0 ? (
-              <p className="text-sm text-slate-500">No blocks in the last 7 days.</p>
+              <p className="text-sm text-slate-500">
+                No blocks in the last 7 days.
+              </p>
             ) : (
               topDevices.map((d) => (
                 <div key={d.device_hash} className="flex items-center gap-3">
                   <div className="flex-1">
                     <div className="flex items-center justify-between text-xs text-slate-600">
-                      <span className="font-mono text-slate-800">{shortHash(d.device_hash)}</span>
+                      <span className="font-mono text-slate-800">
+                        {shortHash(d.device_hash)}
+                      </span>
                       <span>{fmtInt(d.count)}</span>
                     </div>
                     <div className="mt-1 h-2 w-full rounded-full bg-slate-100">
@@ -431,16 +475,22 @@ export default async function MerchantAbusePage() {
 
         {/* Top requested deals */}
         <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-          <p className="text-sm font-semibold text-slate-900">Top requested deals (7d)</p>
+          <p className="text-sm font-semibold text-slate-900">
+            Top requested deals (7d)
+          </p>
           <div className="mt-3 space-y-2">
             {topRequestedDeals.length === 0 ? (
-              <p className="text-sm text-slate-500">No blocks in the last 7 days.</p>
+              <p className="text-sm text-slate-500">
+                No blocks in the last 7 days.
+              </p>
             ) : (
               topRequestedDeals.map((d) => (
                 <div key={d.deal_id} className="flex items-center gap-3">
                   <div className="flex-1">
                     <div className="flex items-center justify-between text-xs text-slate-600">
-                      <span className="font-medium text-slate-800">{d.title}</span>
+                      <span className="font-medium text-slate-800">
+                        {d.title}
+                      </span>
                       <span>{fmtInt(d.count)}</span>
                     </div>
                     <div className="mt-1 h-2 w-full rounded-full bg-slate-100">
@@ -465,7 +515,9 @@ export default async function MerchantAbusePage() {
         </div>
 
         {recent.length === 0 ? (
-          <p className="mt-3 text-sm text-slate-500">No block events recorded yet.</p>
+          <p className="mt-3 text-sm text-slate-500">
+            No block events recorded yet.
+          </p>
         ) : (
           <div className="mt-3 overflow-x-auto">
             <table className="w-full text-sm">
@@ -481,13 +533,18 @@ export default async function MerchantAbusePage() {
               </thead>
               <tbody>
                 {recent.map((r) => (
-                  <tr key={r.id} className="border-b last:border-b-0 align-top">
+                  <tr
+                    key={r.id}
+                    className="border-b last:border-b-0 align-top"
+                  >
                     <td className="py-2 pr-3 text-slate-700 whitespace-nowrap">
                       {new Date(r.created_at).toLocaleString()}
                     </td>
 
                     <td className="py-2 pr-3">
-                      <div className="font-medium text-slate-900">{r.reason}</div>
+                      <div className="font-medium text-slate-900">
+                        {r.reason}
+                      </div>
                       {r.user_agent ? (
                         <div className="mt-1 text-[11px] text-slate-500 break-all">
                           UA: {r.user_agent}
@@ -496,23 +553,33 @@ export default async function MerchantAbusePage() {
                     </td>
 
                     <td className="py-2 pr-3">
-                      <div className="font-medium text-slate-900">{r.requested_title}</div>
-                      <div className="text-[11px] text-slate-500">ID: {r.requested_deal_id}</div>
+                      <div className="font-medium text-slate-900">
+                        {r.requested_title}
+                      </div>
+                      <div className="text-[11px] text-slate-500">
+                        ID: {r.requested_deal_id}
+                      </div>
                     </td>
 
                     <td className="py-2 pr-3">
                       {r.blocked_title ? (
                         <>
-                          <div className="font-medium text-slate-900">{r.blocked_title}</div>
+                          <div className="font-medium text-slate-900">
+                            {r.blocked_title}
+                          </div>
                           <div className="text-[11px] text-slate-500">
                             Deal: {r.blocked_deal_id || "—"}
                           </div>
                           <div className="text-[11px] text-slate-500">
-                            Short: <span className="font-mono">{r.blocked_short_code || "—"}</span>
+                            Short:{" "}
+                            <span className="font-mono">
+                              {r.blocked_short_code || "—"}
+                            </span>
                           </div>
                           {r.blocked_expires_at ? (
                             <div className="text-[11px] text-slate-500">
-                              Expires: {new Date(r.blocked_expires_at).toLocaleString()}
+                              Expires:{" "}
+                              {new Date(r.blocked_expires_at).toLocaleString()}
                             </div>
                           ) : null}
                         </>
