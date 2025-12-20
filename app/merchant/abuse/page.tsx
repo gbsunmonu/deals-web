@@ -1,58 +1,185 @@
+// app/merchant/abuse/page.tsx
 import { prisma } from "@/lib/prisma";
 import { getServerSupabaseRSC } from "@/lib/supabase";
 import { redirect } from "next/navigation";
 
 export const dynamic = "force-dynamic";
 
-type Row = {
-  device_hash: string;
-  blocks: number;
-  last_seen: string;
-  reasons: string;
+type SummaryRow = {
+  blocks_24h: number;
+  blocks_7d: number;
+  blocks_30d: number;
+  devices_24h: number;
+  devices_7d: number;
+  devices_30d: number;
 };
 
-export default async function AbuseDashboardPage() {
-  // ✅ Require merchant login
+type TopReasonRow = { reason: string; count: number };
+type TopDeviceRow = { device_hash: string; count: number };
+type TopDealRow = { deal_id: string; title: string; count: number };
+
+type RecentRow = {
+  id: string;
+  created_at: string;
+  reason: string;
+  retry_after_sec: number | null;
+  device_hash: string;
+
+  requested_deal_id: string;
+  requested_title: string;
+
+  blocked_deal_id: string | null;
+  blocked_title: string | null;
+
+  blocked_short_code: string | null;
+  blocked_expires_at: string | null;
+
+  user_agent: string | null;
+};
+
+function fmtInt(n: number) {
+  return new Intl.NumberFormat().format(n);
+}
+
+function shortHash(h: string) {
+  if (!h) return "";
+  return `${h.slice(0, 6)}…${h.slice(-4)}`;
+}
+
+function barPct(value: number, max: number) {
+  if (max <= 0) return 0;
+  return Math.max(0, Math.min(100, Math.round((value / max) * 100)));
+}
+
+export default async function MerchantAbusePage() {
+  // ✅ Auth
   const supabase = await getServerSupabaseRSC();
   const {
     data: { user },
-  } = await (await supabase).auth.getUser();
+  } = await supabase.auth.getUser();
 
   if (!user) redirect("/login");
 
-  // ✅ Resolve merchant record
-  const merchant = await prisma.merchant.findFirst({
-    where: { userId: user.id },
+  // ✅ Resolve merchantId from Merchant.userId
+  const merchant = await prisma.merchant.findUnique({
+    where: { userId: user.id as any }, // user.id is UUID string in Supabase
     select: { id: true, name: true },
   });
 
   if (!merchant) {
-    return (
-      <main className="mx-auto max-w-5xl px-4 py-10">
-        <h1 className="text-2xl font-semibold text-slate-900">Abuse dashboard</h1>
-        <p className="mt-2 text-slate-600">
-          No merchant profile found for this account.
-        </p>
-      </main>
-    );
+    // If you want a nicer UX, change this to a page message instead.
+    redirect("/merchant");
   }
 
-  // ✅ Merchant-only: only logs where requested deal belongs to this merchant
-  const rows = await prisma.$queryRaw<Row[]>`
+  const merchantId = merchant.id;
+
+  // -------------------------
+  // Summary counts
+  // -------------------------
+  const summaryRows = await prisma.$queryRaw<SummaryRow[]>`
+    WITH logs AS (
+      SELECT rbl.*
+      FROM "RedemptionBlockLog" rbl
+      JOIN "Deal" dreq
+        ON dreq."id" = rbl."requested_deal_id"
+      WHERE dreq."merchantId" = CAST(${merchantId} AS uuid)
+    )
     SELECT
-      l.device_hash,
-      COUNT(*)::int as blocks,
-      MAX(l.created_at)::text as last_seen,
-      STRING_AGG(DISTINCT l.reason, ', ') as reasons
-    FROM "RedemptionBlockLog" l
-    JOIN "Deal" d ON d.id = l.requested_deal_id
-    WHERE d."merchantId" = ${merchant.id}
-      AND l.created_at >= NOW() - INTERVAL '7 days'
-    GROUP BY l.device_hash
-    HAVING COUNT(*) > 1
-    ORDER BY blocks DESC, last_seen DESC
+      (SELECT COUNT(*)::int FROM logs WHERE "created_at" >= NOW() - INTERVAL '24 hours') AS blocks_24h,
+      (SELECT COUNT(*)::int FROM logs WHERE "created_at" >= NOW() - INTERVAL '7 days') AS blocks_7d,
+      (SELECT COUNT(*)::int FROM logs WHERE "created_at" >= NOW() - INTERVAL '30 days') AS blocks_30d,
+      (SELECT COUNT(DISTINCT "device_hash")::int FROM logs WHERE "created_at" >= NOW() - INTERVAL '24 hours') AS devices_24h,
+      (SELECT COUNT(DISTINCT "device_hash")::int FROM logs WHERE "created_at" >= NOW() - INTERVAL '7 days') AS devices_7d,
+      (SELECT COUNT(DISTINCT "device_hash")::int FROM logs WHERE "created_at" >= NOW() - INTERVAL '30 days') AS devices_30d
+  `;
+  const summary = summaryRows?.[0] || {
+    blocks_24h: 0,
+    blocks_7d: 0,
+    blocks_30d: 0,
+    devices_24h: 0,
+    devices_7d: 0,
+    devices_30d: 0,
+  };
+
+  // -------------------------
+  // Top reasons (7d)
+  // -------------------------
+  const topReasons = await prisma.$queryRaw<TopReasonRow[]>`
+    SELECT rbl."reason" as reason, COUNT(*)::int as count
+    FROM "RedemptionBlockLog" rbl
+    JOIN "Deal" dreq
+      ON dreq."id" = rbl."requested_deal_id"
+    WHERE dreq."merchantId" = CAST(${merchantId} AS uuid)
+      AND rbl."created_at" >= NOW() - INTERVAL '7 days'
+    GROUP BY rbl."reason"
+    ORDER BY count DESC
+    LIMIT 8
+  `;
+
+  // -------------------------
+  // Top devices (7d)
+  // -------------------------
+  const topDevices = await prisma.$queryRaw<TopDeviceRow[]>`
+    SELECT rbl."device_hash" as device_hash, COUNT(*)::int as count
+    FROM "RedemptionBlockLog" rbl
+    JOIN "Deal" dreq
+      ON dreq."id" = rbl."requested_deal_id"
+    WHERE dreq."merchantId" = CAST(${merchantId} AS uuid)
+      AND rbl."created_at" >= NOW() - INTERVAL '7 days'
+    GROUP BY rbl."device_hash"
+    ORDER BY count DESC
+    LIMIT 8
+  `;
+
+  // -------------------------
+  // Top requested deals (7d)
+  // -------------------------
+  const topRequestedDeals = await prisma.$queryRaw<TopDealRow[]>`
+    SELECT dreq."id" as deal_id, dreq."title" as title, COUNT(*)::int as count
+    FROM "RedemptionBlockLog" rbl
+    JOIN "Deal" dreq
+      ON dreq."id" = rbl."requested_deal_id"
+    WHERE dreq."merchantId" = CAST(${merchantId} AS uuid)
+      AND rbl."created_at" >= NOW() - INTERVAL '7 days'
+    GROUP BY dreq."id", dreq."title"
+    ORDER BY count DESC
+    LIMIT 8
+  `;
+
+  // -------------------------
+  // Recent log rows (latest 50)
+  // -------------------------
+  const recent = await prisma.$queryRaw<RecentRow[]>`
+    SELECT
+      rbl."id"::text as id,
+      rbl."created_at"::text as created_at,
+      rbl."reason" as reason,
+      rbl."retry_after_sec" as retry_after_sec,
+      rbl."device_hash" as device_hash,
+
+      rbl."requested_deal_id"::text as requested_deal_id,
+      dreq."title" as requested_title,
+
+      rbl."blocked_deal_id"::text as blocked_deal_id,
+      dblk."title" as blocked_title,
+
+      rbl."blocked_short_code" as blocked_short_code,
+      rbl."blocked_expires_at"::text as blocked_expires_at,
+
+      rbl."user_agent" as user_agent
+    FROM "RedemptionBlockLog" rbl
+    JOIN "Deal" dreq
+      ON dreq."id" = rbl."requested_deal_id"
+    LEFT JOIN "Deal" dblk
+      ON dblk."id" = rbl."blocked_deal_id"
+    WHERE dreq."merchantId" = CAST(${merchantId} AS uuid)
+    ORDER BY rbl."created_at" DESC
     LIMIT 50
   `;
+
+  const reasonMax = Math.max(0, ...topReasons.map((r) => r.count));
+  const deviceMax = Math.max(0, ...topDevices.map((r) => r.count));
+  const dealMax = Math.max(0, ...topRequestedDeals.map((r) => r.count));
 
   return (
     <main className="mx-auto max-w-6xl px-4 py-10">
@@ -61,35 +188,188 @@ export default async function AbuseDashboardPage() {
           Abuse dashboard
         </h1>
         <p className="mt-2 text-slate-600">
-          Merchant: <span className="font-semibold">{merchant.name}</span> — shows devices
-          repeatedly blocked (last 7 days).
+          Anti-hoarding blocks for <span className="font-semibold">{merchant.name}</span> (merchant-only).
         </p>
       </header>
 
-      <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-        {rows.length === 0 ? (
-          <p className="text-sm text-slate-600">No repeat hoarding blocks yet.</p>
+      {/* Summary cards */}
+      <section className="grid gap-4 md:grid-cols-3">
+        <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+          <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Last 24 hours</p>
+          <p className="mt-2 text-3xl font-semibold text-slate-900">{fmtInt(summary.blocks_24h)}</p>
+          <p className="mt-1 text-sm text-slate-600">{fmtInt(summary.devices_24h)} unique devices</p>
+        </div>
+
+        <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+          <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Last 7 days</p>
+          <p className="mt-2 text-3xl font-semibold text-slate-900">{fmtInt(summary.blocks_7d)}</p>
+          <p className="mt-1 text-sm text-slate-600">{fmtInt(summary.devices_7d)} unique devices</p>
+        </div>
+
+        <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+          <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Last 30 days</p>
+          <p className="mt-2 text-3xl font-semibold text-slate-900">{fmtInt(summary.blocks_30d)}</p>
+          <p className="mt-1 text-sm text-slate-600">{fmtInt(summary.devices_30d)} unique devices</p>
+        </div>
+      </section>
+
+      {/* Top lists */}
+      <section className="mt-6 grid gap-4 lg:grid-cols-3">
+        {/* Top reasons */}
+        <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+          <p className="text-sm font-semibold text-slate-900">Top reasons (7d)</p>
+          <div className="mt-3 space-y-2">
+            {topReasons.length === 0 ? (
+              <p className="text-sm text-slate-500">No blocks in the last 7 days.</p>
+            ) : (
+              topReasons.map((r) => (
+                <div key={r.reason} className="flex items-center gap-3">
+                  <div className="flex-1">
+                    <div className="flex items-center justify-between text-xs text-slate-600">
+                      <span className="font-medium text-slate-800">{r.reason}</span>
+                      <span>{fmtInt(r.count)}</span>
+                    </div>
+                    <div className="mt-1 h-2 w-full rounded-full bg-slate-100">
+                      <div
+                        className="h-2 rounded-full bg-slate-900/70"
+                        style={{ width: `${barPct(r.count, reasonMax)}%` }}
+                      />
+                    </div>
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+
+        {/* Top devices */}
+        <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+          <p className="text-sm font-semibold text-slate-900">Top devices (7d)</p>
+          <div className="mt-3 space-y-2">
+            {topDevices.length === 0 ? (
+              <p className="text-sm text-slate-500">No blocks in the last 7 days.</p>
+            ) : (
+              topDevices.map((d) => (
+                <div key={d.device_hash} className="flex items-center gap-3">
+                  <div className="flex-1">
+                    <div className="flex items-center justify-between text-xs text-slate-600">
+                      <span className="font-mono text-slate-800">{shortHash(d.device_hash)}</span>
+                      <span>{fmtInt(d.count)}</span>
+                    </div>
+                    <div className="mt-1 h-2 w-full rounded-full bg-slate-100">
+                      <div
+                        className="h-2 rounded-full bg-slate-900/70"
+                        style={{ width: `${barPct(d.count, deviceMax)}%` }}
+                      />
+                    </div>
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+          <p className="mt-3 text-[11px] text-slate-500">
+            Hash is truncated for display. Use DB to inspect full value.
+          </p>
+        </div>
+
+        {/* Top requested deals */}
+        <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+          <p className="text-sm font-semibold text-slate-900">Top requested deals (7d)</p>
+          <div className="mt-3 space-y-2">
+            {topRequestedDeals.length === 0 ? (
+              <p className="text-sm text-slate-500">No blocks in the last 7 days.</p>
+            ) : (
+              topRequestedDeals.map((d) => (
+                <div key={d.deal_id} className="flex items-center gap-3">
+                  <div className="flex-1">
+                    <div className="flex items-center justify-between text-xs text-slate-600">
+                      <span className="font-medium text-slate-800">{d.title}</span>
+                      <span>{fmtInt(d.count)}</span>
+                    </div>
+                    <div className="mt-1 h-2 w-full rounded-full bg-slate-100">
+                      <div
+                        className="h-2 rounded-full bg-slate-900/70"
+                        style={{ width: `${barPct(d.count, dealMax)}%` }}
+                      />
+                    </div>
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+      </section>
+
+      {/* Recent events table */}
+      <section className="mt-6 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+        <div className="flex items-center justify-between">
+          <p className="text-sm font-semibold text-slate-900">Recent blocks</p>
+          <p className="text-[11px] text-slate-500">Latest 50</p>
+        </div>
+
+        {recent.length === 0 ? (
+          <p className="mt-3 text-sm text-slate-500">No block events recorded yet.</p>
         ) : (
-          <div className="overflow-x-auto">
+          <div className="mt-3 overflow-x-auto">
             <table className="w-full text-sm">
               <thead className="text-left text-slate-500">
                 <tr className="border-b">
-                  <th className="py-2 pr-3">Device hash</th>
-                  <th className="py-2 pr-3">Blocks</th>
-                  <th className="py-2 pr-3">Reasons</th>
-                  <th className="py-2 pr-3">Last seen</th>
+                  <th className="py-2 pr-3">Time</th>
+                  <th className="py-2 pr-3">Reason</th>
+                  <th className="py-2 pr-3">Requested deal</th>
+                  <th className="py-2 pr-3">Blocked by</th>
+                  <th className="py-2 pr-3">Device</th>
+                  <th className="py-2 pr-3">Retry</th>
                 </tr>
               </thead>
               <tbody>
-                {rows.map((r) => (
-                  <tr key={r.device_hash} className="border-b last:border-b-0">
-                    <td className="py-2 pr-3 font-mono text-slate-800">
-                      {r.device_hash}
+                {recent.map((r) => (
+                  <tr key={r.id} className="border-b last:border-b-0 align-top">
+                    <td className="py-2 pr-3 text-slate-700 whitespace-nowrap">
+                      {new Date(r.created_at).toLocaleString()}
                     </td>
-                    <td className="py-2 pr-3 text-slate-800">{r.blocks}</td>
-                    <td className="py-2 pr-3 text-slate-700">{r.reasons}</td>
-                    <td className="py-2 pr-3 text-slate-700">
-                      {new Date(r.last_seen).toLocaleString()}
+
+                    <td className="py-2 pr-3">
+                      <div className="font-medium text-slate-900">{r.reason}</div>
+                      {r.user_agent ? (
+                        <div className="mt-1 text-[11px] text-slate-500 break-all">
+                          UA: {r.user_agent}
+                        </div>
+                      ) : null}
+                    </td>
+
+                    <td className="py-2 pr-3">
+                      <div className="font-medium text-slate-900">{r.requested_title}</div>
+                      <div className="text-[11px] text-slate-500">ID: {r.requested_deal_id}</div>
+                    </td>
+
+                    <td className="py-2 pr-3">
+                      {r.blocked_title ? (
+                        <>
+                          <div className="font-medium text-slate-900">{r.blocked_title}</div>
+                          <div className="text-[11px] text-slate-500">
+                            Deal: {r.blocked_deal_id || "—"}
+                          </div>
+                          <div className="text-[11px] text-slate-500">
+                            Short: <span className="font-mono">{r.blocked_short_code || "—"}</span>
+                          </div>
+                          {r.blocked_expires_at ? (
+                            <div className="text-[11px] text-slate-500">
+                              Expires: {new Date(r.blocked_expires_at).toLocaleString()}
+                            </div>
+                          ) : null}
+                        </>
+                      ) : (
+                        <span className="text-slate-500">—</span>
+                      )}
+                    </td>
+
+                    <td className="py-2 pr-3 font-mono text-slate-700 whitespace-nowrap">
+                      {shortHash(r.device_hash)}
+                    </td>
+
+                    <td className="py-2 pr-3 text-slate-700 whitespace-nowrap">
+                      {r.retry_after_sec ? `${r.retry_after_sec}s` : "—"}
                     </td>
                   </tr>
                 ))}
@@ -97,10 +377,6 @@ export default async function AbuseDashboardPage() {
             </table>
           </div>
         )}
-
-        <p className="mt-4 text-[11px] text-slate-500">
-          Note: we log both anti-hoarding blocks (ACTIVE_QR_EXISTS) and cooldown blocks (COOLDOWN).
-        </p>
       </section>
     </main>
   );
