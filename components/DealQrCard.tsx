@@ -7,7 +7,13 @@ type Props = {
   id: string; // dealId
   title: string;
   merchantName?: string;
-  endsAtIso: string; // deal endsAt (server truth)
+  endsAtIso: string;
+};
+
+type BlockedByInfo = {
+  dealId: string;
+  shortCode?: string | null;
+  expiresAt?: string | null;
 };
 
 function formatCountdown(ms: number) {
@@ -33,35 +39,45 @@ function getOrCreateDeviceId() {
   return v;
 }
 
-export default function DealQrCard({
-  id,
-  title,
-  merchantName,
-  endsAtIso,
-}: Props) {
+export default function DealQrCard({ id, title, merchantName, endsAtIso }: Props) {
   const [now, setNow] = useState(() => Date.now());
   const [loading, setLoading] = useState(true);
-  const [err, setErr] = useState<string | null>(null);
 
   const [shortCode, setShortCode] = useState("");
   const [expiresAtIso, setExpiresAtIso] = useState("");
 
-  // origin-safe
-  const [origin, setOrigin] = useState("");
+  const [err, setErr] = useState<string | null>(null);
+
+  // ✅ Anti-hoarding info (if server blocks NEW QR generation)
+  const [blockedBy, setBlockedBy] = useState<BlockedByInfo | null>(null);
+
+  // ✅ cooldown UI state (server may return retryAfterSeconds)
+  const [cooldownUntilMs, setCooldownUntilMs] = useState<number>(0);
+  const cooldownMsLeft = Math.max(0, cooldownUntilMs - now);
+  const inCooldown = cooldownMsLeft > 0;
+
+  // origin safe
+  const [origin, setOrigin] = useState<string>("");
   useEffect(() => {
     try {
       setOrigin(window.location.origin);
-    } catch {}
+    } catch {
+      setOrigin("");
+    }
   }, []);
 
-  // tick countdown
   useEffect(() => {
     const t = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(t);
   }, []);
 
-  async function loadRedeemQr() {
+  async function claimOrRefresh() {
     setErr(null);
+    setBlockedBy(null);
+
+    // ✅ block clicks while cooldown active
+    if (inCooldown) return;
+
     setLoading(true);
 
     try {
@@ -73,27 +89,48 @@ export default function DealQrCard({
           "Content-Type": "application/json",
           "x-device-id": deviceId,
         },
+        body: JSON.stringify({}),
         cache: "no-store",
       });
 
       const data = await res.json().catch(() => ({}));
 
-      if (!res.ok || !data?.ok) {
-        throw new Error(data?.error || "Failed to generate redeem QR");
+      // ✅ Anti-hoarding or cooldown response
+      if (res.status === 429) {
+        const retryAfterSeconds = Number(
+          data?.retryAfterSeconds || data?.cooldownSeconds || 0
+        );
+        if (retryAfterSeconds > 0) {
+          setCooldownUntilMs(Date.now() + retryAfterSeconds * 1000);
+        }
+
+        if (data?.blockedBy?.dealId) {
+          setBlockedBy({
+            dealId: String(data.blockedBy.dealId),
+            shortCode: data.blockedBy.shortCode ?? null,
+            expiresAt: data.blockedBy.expiresAt ?? null,
+          });
+        }
+
+        setErr(data?.error || "Please wait before generating another QR.");
+        return;
       }
 
-      setShortCode(String(data.shortCode));
-      setExpiresAtIso(String(data.expiresAt));
+      if (!res.ok || !data?.ok) {
+        throw new Error(data?.error || "Failed to generate QR");
+      }
+
+      setShortCode(String(data.shortCode || ""));
+      setExpiresAtIso(String(data.expiresAt || ""));
     } catch (e: any) {
-      setErr(e?.message || "Could not generate redeem QR");
+      setErr(e?.message || "Could not generate QR");
     } finally {
       setLoading(false);
     }
   }
 
-  // auto-generate redeem QR on load
   useEffect(() => {
-    loadRedeemQr();
+    claimOrRefresh();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
@@ -106,7 +143,8 @@ export default function DealQrCard({
 
   const payload = useMemo(() => {
     if (!shortCode) return "";
-    return origin ? `${origin}/redeem/${shortCode}` : shortCode;
+    if (!origin) return shortCode;
+    return `${origin}/redeem/${shortCode}`;
   }, [shortCode, origin]);
 
   const qrUrl = useMemo(() => {
@@ -116,44 +154,126 @@ export default function DealQrCard({
     )}`;
   }, [payload]);
 
+  const blockedExpiresMs = blockedBy?.expiresAt
+    ? new Date(blockedBy.expiresAt).getTime()
+    : 0;
+  const blockedMsLeft = blockedExpiresMs
+    ? Math.max(0, blockedExpiresMs - now)
+    : 0;
+
+  // ✅ If blockedBy is present, user should NOT try to "refresh" this deal's QR
+  const isBlocked = !!blockedBy?.dealId;
+
+  const canRefresh = !loading && !dealEnded && !inCooldown && !isBlocked;
+
+  const blockedDealQrPath = blockedBy?.dealId
+    ? `/deals/${blockedBy.dealId}/qr`
+    : "";
+
   return (
-    <div className="mx-auto max-w-md rounded-3xl border border-slate-200 bg-white px-6 py-6 shadow-sm">
+    <div className="mx-auto max-w-md rounded-3xl border border-gray-200 bg-white px-6 py-6 shadow-sm">
       <div className="mb-4 text-center">
-        <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">
-          Redeem QR
+        <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-400">
+          Deal QR code
         </p>
-        <h1 className="mt-1 text-lg font-bold text-slate-900">{title}</h1>
+        <h1 className="mt-1 text-lg font-bold tracking-tight text-gray-900">
+          {title}
+        </h1>
         {merchantName && (
-          <p className="mt-1 text-xs text-slate-600">at {merchantName}</p>
+          <p className="mt-1 text-xs text-gray-600">at {merchantName}</p>
         )}
-        <p className="mt-2 text-xs text-slate-500">
-          Show this QR to the merchant. It expires in{" "}
-          <span className="font-semibold">15 minutes</span>.
+        <p className="mt-1 text-[11px] text-gray-500">
+          This QR is locked to your device and expires in 15 minutes.
         </p>
       </div>
 
-      {err && (
-        <div className="mb-4 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800">
+      {/* ✅ Anti-hoarding banner with deep-link */}
+      {isBlocked && (
+        <div className="mb-4 rounded-2xl border border-amber-200 bg-amber-50 px-3 py-3 text-sm text-amber-900">
+          <p className="font-semibold">⚠️ You already have an active QR</p>
+
+          <p className="mt-1 text-[13px]">
+            Only <span className="font-semibold">one active QR</span> is allowed per device to prevent hoarding.
+            {blockedBy?.expiresAt ? (
+              <>
+                {" "}
+                Your current active QR expires in{" "}
+                <span className="font-semibold">
+                  {formatCountdown(blockedMsLeft)}
+                </span>
+                .
+              </>
+            ) : null}
+          </p>
+
+          <div className="mt-3 flex flex-wrap gap-2">
+            {blockedDealQrPath && (
+              <Link
+                href={blockedDealQrPath}
+                className="rounded-full bg-amber-600 px-4 py-2 text-sm font-semibold text-white hover:bg-amber-700"
+              >
+                Open active QR →
+              </Link>
+            )}
+
+            <button
+              type="button"
+              onClick={claimOrRefresh}
+              disabled={loading || inCooldown}
+              className={[
+                "rounded-full px-4 py-2 text-sm font-semibold shadow-sm transition",
+                loading || inCooldown
+                  ? "bg-gray-200 text-gray-400 cursor-not-allowed"
+                  : "border border-amber-300 text-amber-900 hover:bg-amber-100",
+              ].join(" ")}
+            >
+              Try again
+            </button>
+          </div>
+
+          <p className="mt-2 text-[11px] text-amber-900/70">
+            If the customer downloaded a QR image earlier, it still expires after 15 minutes — they must open the active QR page to redeem.
+          </p>
+        </div>
+      )}
+
+      {/* Generic error (only if not blockedBy) */}
+      {err && !isBlocked && (
+        <div className="mb-4 rounded-2xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800">
           {err}
         </div>
       )}
 
+      {inCooldown && (
+        <div className="mb-4 rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700">
+          ⏳ Cooldown active — try again in{" "}
+          <span className="font-semibold">
+            {formatCountdown(cooldownMsLeft)}
+          </span>
+          .
+        </div>
+      )}
+
       <div className="flex flex-col items-center gap-4">
-        <div className="rounded-2xl bg-slate-100 p-4">
+        <div className="flex items-center justify-center rounded-2xl bg-gray-100 p-4">
           {loading ? (
-            <div className="flex h-56 w-56 items-center justify-center rounded-lg bg-white text-sm text-slate-500">
-              Generating redeem QR…
+            <div className="flex h-56 w-56 items-center justify-center rounded-lg bg-white text-sm text-gray-500">
+              Generating…
             </div>
           ) : qrUrl ? (
             <img
               src={qrUrl}
-              alt="Redeem QR"
+              alt="Deal QR code"
               className={[
-                "h-56 w-56 rounded-lg bg-white",
+                "h-56 w-56 rounded-lg bg-white transition",
                 isExpired ? "opacity-40 blur-[1px]" : "",
               ].join(" ")}
             />
-          ) : null}
+          ) : (
+            <div className="flex h-56 w-56 items-center justify-center rounded-lg bg-white text-sm text-gray-500">
+              No QR
+            </div>
+          )}
         </div>
 
         <div
@@ -169,45 +289,40 @@ export default function DealQrCard({
           {dealEnded
             ? "Deal ended"
             : isExpired
-            ? "Redeem QR expired"
+            ? "QR expired"
             : `Expires in ${formatCountdown(qrMsLeft)}`}
         </div>
 
-        {!!shortCode && (
-          <div className="text-center">
-            <p className="text-[11px] text-slate-500">Short code</p>
-            <p className="mt-1 rounded-xl bg-slate-100 px-4 py-2 font-mono text-base font-semibold tracking-widest text-slate-900">
-              {shortCode}
-            </p>
+        {/* ✅ Hide refresh when blocked */}
+        {!isBlocked && (
+          <div className="flex w-full items-center justify-center gap-2">
+            <button
+              type="button"
+              onClick={claimOrRefresh}
+              disabled={!canRefresh}
+              className={[
+                "rounded-full px-4 py-2 text-sm font-semibold shadow-sm transition",
+                !canRefresh
+                  ? "bg-gray-200 text-gray-400 cursor-not-allowed"
+                  : "bg-emerald-600 text-white hover:bg-emerald-700",
+              ].join(" ")}
+            >
+              {isExpired ? "Generate new QR" : "Refresh QR"}
+            </button>
           </div>
         )}
 
-        {!!shortCode && (
-          <Link
-            href={`/redeem/${shortCode}`}
-            className="w-full rounded-full bg-emerald-600 px-4 py-2 text-center text-sm font-semibold text-white hover:bg-emerald-700"
-          >
-            Open merchant redeem screen →
-          </Link>
-        )}
+        <div className="mt-2 w-full rounded-2xl border border-gray-200 bg-gray-50 px-3 py-3">
+          <p className="mb-1 text-[11px] font-semibold text-gray-700">
+            Redeem link:
+          </p>
+          <pre className="max-h-24 overflow-x-auto whitespace-pre-wrap break-all rounded-md bg-white px-2 py-1 text-[11px] text-gray-800">
+            {payload || shortCode || "—"}
+          </pre>
+        </div>
 
-        <button
-          type="button"
-          onClick={loadRedeemQr}
-          disabled={dealEnded || loading}
-          className={[
-            "w-full rounded-full px-4 py-2 text-sm font-semibold",
-            dealEnded || loading
-              ? "bg-slate-200 text-slate-400"
-              : "border border-slate-300 text-slate-800 hover:bg-slate-50",
-          ].join(" ")}
-        >
-          Refresh redeem QR
-        </button>
-
-        <p className="mt-2 text-center text-[10px] text-slate-400">
-          Don’t share or download this QR.  
-          If it expires, refresh to generate a new one.
+        <p className="mt-2 text-[10px] text-gray-400 text-center">
+          Don’t share your QR publicly. If it expires, generate a new one.
         </p>
       </div>
     </div>
