@@ -1,18 +1,32 @@
-// deals-web/app/logout/route.ts
-import { NextResponse } from "next/server";
-import { createSupabaseServer } from "@/lib/supabase-server";
+import { NextRequest, NextResponse } from "next/server";
+import { createServerClient } from "@supabase/ssr";
 
-export async function GET(request: Request) {
-  const url = new URL(request.url);
-  const next = url.searchParams.get("next") ?? "/";
+export async function GET(req: NextRequest) {
+  const res = NextResponse.redirect(new URL("/", req.url));
 
-  try {
-    const supabase = await createSupabaseServer(); // ✅ await
-    await supabase.auth.signOut();
-  } catch (err) {
-    console.error("[/logout] sign out error:", err);
-    // still redirect even if sign-out fails
+  const url = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL || "";
+  const anon = process.env.SUPABASE_ANON_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || "";
+
+  if (!url || !anon) {
+    // If env is missing, still redirect.
+    return res;
   }
 
-  return NextResponse.redirect(new URL(next, request.url));
+  const supabase = createServerClient(url, anon, {
+    cookies: {
+      getAll() {
+        return req.cookies.getAll();
+      },
+      setAll(cookiesToSet) {
+        cookiesToSet.forEach(({ name, value, options }) => {
+          res.cookies.set(name, value, options);
+        });
+      },
+    },
+  });
+
+  // ✅ This clears auth cookies correctly server-side
+  await supabase.auth.signOut();
+
+  return res;
 }
