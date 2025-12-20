@@ -15,10 +15,11 @@ enum DiscountType {
 }
 
 model Merchant {
-  id          String   @id @default(uuid())
+  id          String   @id @default(uuid()) @db.Uuid
 
   // Link to Supabase auth user (nullable but unique)
-  userId      String?  @unique
+  // (Supabase auth user ids are UUIDs)
+  userId      String?  @unique @db.Uuid
 
   name        String
   description String?
@@ -37,38 +38,38 @@ model Merchant {
 }
 
 model Deal {
-  id            String       @id @default(uuid())
-  title         String
-  description   String
+  id             String       @id @default(uuid()) @db.Uuid
+  title          String
+  description    String
 
-  originalPrice Int?
+  originalPrice  Int?
 
-  shortCode     String?      @unique
+  shortCode      String?      @unique
 
-  discountValue Int          @default(0)
-  discountType  DiscountType @default(NONE)
+  discountValue  Int          @default(0)
+  discountType   DiscountType @default(NONE)
 
-  imageUrl      String?
+  imageUrl       String?
 
   // ✅ how many times the deal can be redeemed total (null/0 = unlimited)
   maxRedemptions Int?
 
-  startsAt      DateTime
-  endsAt        DateTime
+  startsAt       DateTime
+  endsAt         DateTime
 
-  merchantId    String
-  merchant      Merchant     @relation(fields: [merchantId], references: [id])
+  merchantId     String       @db.Uuid
+  merchant       Merchant     @relation(fields: [merchantId], references: [id])
 
-  redemptions   Redemption[]
+  redemptions    Redemption[]
 
-  createdAt     DateTime     @default(now())
-  updatedAt     DateTime     @updatedAt
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
 }
 
 model Redemption {
-  id         String   @id @default(uuid())
+  id         String   @id @default(uuid()) @db.Uuid
 
-  dealId     String
+  dealId     String   @db.Uuid
   deal       Deal     @relation(fields: [dealId], references: [id])
 
   code       String   @unique
