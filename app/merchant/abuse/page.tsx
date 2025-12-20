@@ -35,101 +35,55 @@ export default async function MerchantAbusePage() {
 
   if (!user) redirect("/login");
 
-  // Find the merchant linked to this Supabase user
+  // Find merchant linked to this Supabase user
   const merchant = await prisma.merchant.findFirst({
     where: { userId: user.id },
     select: { id: true, name: true },
   });
 
-  if (!merchant) {
-    // If you have a dedicated merchant onboarding page, redirect there instead
-    redirect("/merchant");
-  }
-
-  // Fetch merchant deal IDs
-  const deals = await prisma.deal.findMany({
-    where: { merchantId: merchant.id },
-    select: { id: true },
-  });
-
-  const dealIds = deals.map((d) => d.id);
+  if (!merchant) redirect("/merchant");
 
   const now = new Date();
 
-  // If merchant has no deals, show empty state
-  if (dealIds.length === 0) {
-    return (
-      <main className="mx-auto max-w-5xl px-4 py-10">
-        <header className="mb-8">
-          <h1 className="text-3xl font-semibold tracking-tight text-slate-900">
-            Abuse / Anti-hoarding
-          </h1>
-          <p className="mt-2 text-slate-600">
-            Track devices holding active QRs for your deals.
-          </p>
-        </header>
+  // ✅ HOARDERS via SQL (deviceHash with 2+ active QRs across THIS merchant's deals)
+  // Active = activeKey NOT NULL AND redeemedAt IS NULL AND expiresAt > now
+  const hoarderRows = await prisma.$queryRaw<
+    Array<{
+      device_hash: string;
+      active_count: number;
+      soonest_expiry: Date | null;
+    }>
+  >`
+    SELECT
+      r."deviceHash" as device_hash,
+      COUNT(*)::int as active_count,
+      MIN(r."expiresAt") as soonest_expiry
+    FROM "Redemption" r
+    JOIN "Deal" d
+      ON d."id" = r."dealId"
+    WHERE
+      d."merchantId" = ${merchant.id}
+      AND r."deviceHash" IS NOT NULL
+      AND r."activeKey" IS NOT NULL
+      AND r."redeemedAt" IS NULL
+      AND r."expiresAt" IS NOT NULL
+      AND r."expiresAt" > ${now}
+    GROUP BY r."deviceHash"
+    HAVING COUNT(*) >= 2
+    ORDER BY active_count DESC
+    LIMIT 50
+  `;
 
-        <div className="rounded-2xl border border-dashed border-slate-200 bg-slate-50 px-4 py-10 text-center text-sm text-slate-500">
-          You don’t have any deals yet — create a deal first, then this page will show active QRs and hoarding signals.
-        </div>
-      </main>
-    );
-  }
+  const hoarders: HoarderRow[] = hoarderRows.map((r) => ({
+    deviceHash: r.device_hash,
+    activeCount: Number(r.active_count || 0),
+    soonestExpiryIso: r.soonest_expiry ? r.soonest_expiry.toISOString() : null,
+  }));
 
-  /**
-   * HOARDERS (devices holding multiple ACTIVE QRs for this merchant’s deals)
-   * Active = activeKey != null AND redeemedAt == null AND expiresAt > now
-   */
-  const grouped = await prisma.redemption.groupBy({
-    by: ["deviceHash"],
-    where: {
-      dealId: { in: dealIds },
-      deviceHash: { not: null },
-      activeKey: { not: null },
-      redeemedAt: null,
-      expiresAt: { gt: now },
-    },
-    _count: { _all: true },
-    // Only show devices with 2+ active QRs (true hoarding)
-    having: {
-      _count: {
-        _all: { gt: 1 },
-      },
-    },
-    orderBy: {
-      _count: { _all: "desc" },
-    },
-    take: 50,
-  });
-
-  const hoarders: HoarderRow[] = await Promise.all(
-    grouped.map(async (g) => {
-      const soonest = await prisma.redemption.findFirst({
-        where: {
-          dealId: { in: dealIds },
-          deviceHash: g.deviceHash,
-          activeKey: { not: null },
-          redeemedAt: null,
-          expiresAt: { gt: now },
-        },
-        orderBy: { expiresAt: "asc" },
-        select: { expiresAt: true },
-      });
-
-      return {
-        deviceHash: g.deviceHash ?? "",
-        activeCount: g._count._all,
-        soonestExpiryIso: soonest?.expiresAt ? soonest.expiresAt.toISOString() : null,
-      };
-    })
-  );
-
-  /**
-   * ACTIVE QR LIST (for this merchant’s deals)
-   */
+  // ✅ ACTIVE QR LIST (still Prisma)
   const active = await prisma.redemption.findMany({
     where: {
-      dealId: { in: dealIds },
+      deal: { merchantId: merchant.id },
       activeKey: { not: null },
       redeemedAt: null,
       expiresAt: { gt: now },
@@ -164,23 +118,28 @@ export default async function MerchantAbusePage() {
           Abuse / Anti-hoarding
         </h1>
         <p className="mt-2 text-slate-600">
-          Merchant: <span className="font-medium text-slate-900">{merchant.name}</span>
+          Merchant:{" "}
+          <span className="font-medium text-slate-900">{merchant.name}</span>
         </p>
         <p className="mt-1 text-sm text-slate-500">
-          This page shows devices holding multiple active QRs and the list of currently active QRs (unredeemed + unexpired).
+          This page shows devices holding multiple active QRs and the list of
+          currently active QRs (unredeemed + unexpired).
         </p>
       </header>
 
       {/* Hoarders */}
       <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
         <div className="flex items-center justify-between">
-          <h2 className="text-sm font-semibold text-slate-900">Devices holding multiple active QRs</h2>
+          <h2 className="text-sm font-semibold text-slate-900">
+            Devices holding multiple active QRs
+          </h2>
           <span className="text-[11px] text-slate-500">Auto-detected</span>
         </div>
 
         {hoarders.length === 0 ? (
           <p className="mt-3 text-sm text-slate-500">
-            ✅ No hoarding detected right now (no device has 2+ active QRs for your deals).
+            ✅ No hoarding detected right now (no device has 2+ active QRs for
+            your deals).
           </p>
         ) : (
           <div className="mt-3 overflow-x-auto">
@@ -195,10 +154,16 @@ export default async function MerchantAbusePage() {
               <tbody>
                 {hoarders.map((h) => (
                   <tr key={h.deviceHash} className="border-b last:border-b-0">
-                    <td className="py-2 pr-3 font-mono text-slate-700">{maskHash(h.deviceHash)}</td>
-                    <td className="py-2 pr-3 font-semibold text-amber-700">{h.activeCount}</td>
+                    <td className="py-2 pr-3 font-mono text-slate-700">
+                      {maskHash(h.deviceHash)}
+                    </td>
+                    <td className="py-2 pr-3 font-semibold text-amber-700">
+                      {h.activeCount}
+                    </td>
                     <td className="py-2 pr-3 text-slate-700">
-                      {h.soonestExpiryIso ? new Date(h.soonestExpiryIso).toLocaleString() : "—"}
+                      {h.soonestExpiryIso
+                        ? new Date(h.soonestExpiryIso).toLocaleString()
+                        : "—"}
                     </td>
                   </tr>
                 ))}
@@ -206,8 +171,8 @@ export default async function MerchantAbusePage() {
             </table>
 
             <p className="mt-3 text-[11px] text-slate-500">
-              Tip: your claim API anti-hoarding setting should block new QR generation when a device already has an active QR.
-              If you still see hoarders here, your limit might be set higher than 1 or some old QRs weren’t unlocked yet.
+              Tip: if you still see hoarders here, either your anti-hoarding
+              limit is set higher than 1 or older QRs weren’t unlocked yet.
             </p>
           </div>
         )}
@@ -216,12 +181,18 @@ export default async function MerchantAbusePage() {
       {/* Active QRs */}
       <section className="mt-6 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
         <div className="flex items-center justify-between">
-          <h2 className="text-sm font-semibold text-slate-900">Active QRs (unredeemed + unexpired)</h2>
-          <span className="text-[11px] text-slate-500">{activeRows.length} showing</span>
+          <h2 className="text-sm font-semibold text-slate-900">
+            Active QRs (unredeemed + unexpired)
+          </h2>
+          <span className="text-[11px] text-slate-500">
+            {activeRows.length} showing
+          </span>
         </div>
 
         {activeRows.length === 0 ? (
-          <p className="mt-3 text-sm text-slate-500">No active QRs right now.</p>
+          <p className="mt-3 text-sm text-slate-500">
+            No active QRs right now.
+          </p>
         ) : (
           <div className="mt-3 overflow-x-auto">
             <table className="w-full text-sm">
@@ -238,13 +209,21 @@ export default async function MerchantAbusePage() {
                 {activeRows.map((r) => (
                   <tr key={r.id} className="border-b last:border-b-0">
                     <td className="py-2 pr-3 text-slate-700">
-                      {r.expiresAtIso ? new Date(r.expiresAtIso).toLocaleString() : "—"}
+                      {r.expiresAtIso
+                        ? new Date(r.expiresAtIso).toLocaleString()
+                        : "—"}
                     </td>
                     <td className="py-2 pr-3">
-                      <div className="font-medium text-slate-900">{r.dealTitle}</div>
-                      <div className="text-[11px] text-slate-500">Deal ID: {r.dealId}</div>
+                      <div className="font-medium text-slate-900">
+                        {r.dealTitle}
+                      </div>
+                      <div className="text-[11px] text-slate-500">
+                        Deal ID: {r.dealId}
+                      </div>
                     </td>
-                    <td className="py-2 pr-3 font-mono text-slate-800">{r.shortCode}</td>
+                    <td className="py-2 pr-3 font-mono text-slate-800">
+                      {r.shortCode}
+                    </td>
                     <td className="py-2 pr-3 font-mono text-slate-700">
                       {r.deviceHash ? maskHash(r.deviceHash) : "—"}
                     </td>
@@ -257,7 +236,7 @@ export default async function MerchantAbusePage() {
             </table>
 
             <p className="mt-3 text-[11px] text-slate-500">
-              Note: this list is “live state”. Once a QR is redeemed or expires, it disappears from this list.
+              Once a QR is redeemed or expires, it disappears from this list.
             </p>
           </div>
         )}
