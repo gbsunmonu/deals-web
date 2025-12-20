@@ -1,56 +1,59 @@
 // components/SiteHeader.tsx
 import Link from "next/link";
-import Image from "next/image";
 
-export default function SiteHeader() {
+type Props = {
+  isAuthed: boolean;
+};
+
+export default function SiteHeader({ isAuthed }: Props) {
   return (
-    <header className="border-b bg-white">
-      <div className="mx-auto flex h-14 max-w-6xl items-center justify-between px-4 sm:h-16 sm:px-6">
-        {/* Logo + brand */}
+    <header className="border-b border-slate-200 bg-white">
+      <div className="mx-auto flex max-w-6xl items-center justify-between gap-3 px-4 py-3">
         <Link href="/" className="flex items-center gap-2">
-          <div className="flex h-8 w-8 items-center justify-center rounded-xl bg-emerald-500/90">
-            {/* Uses the logo you added in /public/dealina-logo.svg */}
-            <Image
-              src="/dealina-logo.svg"
-              alt="Dealina logo"
-              width={24}
-              height={24}
-              priority
-            />
+          <div className="grid h-9 w-9 place-items-center rounded-xl bg-emerald-600 text-white font-bold">
+            D
           </div>
-          <span className="text-sm font-semibold tracking-tight sm:text-base">
-            Dealina
-          </span>
+          <div className="leading-tight">
+            <div className="text-sm font-semibold text-slate-900">Dealina</div>
+            <div className="text-[11px] text-slate-500">Save more locally</div>
+          </div>
         </Link>
 
-        {/* Main nav */}
-        <nav className="hidden items-center gap-4 text-xs text-slate-600 sm:flex sm:text-sm">
-          <Link href="/explore" className="hover:text-slate-900">
+        <nav className="flex items-center gap-4 text-sm">
+          <Link href="/" className="text-slate-700 hover:text-slate-900">
             Explore deals
           </Link>
-          <Link href="/my-deals" className="hover:text-slate-900">
-            My deals
-          </Link>
-          <Link href="/redemptions" className="hover:text-slate-900">
-            Redemptions
-          </Link>
-          <Link href="/merchant/tools" className="hover:text-slate-900">
-            Merchant tools
-          </Link>
-          <Link href="/merchant/profile" className="hover:text-slate-900">
-            My account
-          </Link>
-        </nav>
 
-        {/* Auth CTA – client SignInCard handles real auth */}
-        <div className="flex items-center gap-2">
-          <Link
-            href="/auth/sign-in"
-            className="rounded-full border border-slate-200 px-3 py-1 text-xs font-medium text-slate-700 hover:bg-slate-50 sm:px-4 sm:py-1.5 sm:text-sm"
-          >
-            Sign in / Sign up
-          </Link>
-        </div>
+          {isAuthed ? (
+            <>
+              <Link
+                href="/merchant"
+                className="text-slate-700 hover:text-slate-900"
+              >
+                Merchant home
+              </Link>
+              <Link
+                href="/merchant/redeem"
+                className="text-slate-700 hover:text-slate-900"
+              >
+                Redeem QR
+              </Link>
+              <Link
+                href="/merchant/abuse"
+                className="text-slate-700 hover:text-slate-900"
+              >
+                Abuse
+              </Link>
+            </>
+          ) : (
+            <Link
+              href="/login"
+              className="rounded-full bg-slate-900 px-4 py-2 text-white hover:bg-slate-800"
+            >
+              Merchant login
+            </Link>
+          )}
+        </nav>
       </div>
     </header>
   );
