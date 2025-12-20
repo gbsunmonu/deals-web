@@ -99,16 +99,16 @@ model Redemption {
 }
 
 model RedemptionBlockLog {
-  id String @id @default(uuid())
+  id String @id @default(uuid()) @db.Uuid
 
   createdAt DateTime @default(now()) @map("created_at")
 
   deviceHash String @map("device_hash")
 
-  requestedDealId String @map("requested_deal_id")
+  requestedDealId String @db.Uuid @map("requested_deal_id")
   requestedDeal   Deal   @relation("RequestedDeal", fields: [requestedDealId], references: [id], onDelete: Cascade)
 
-  blockedDealId String? @map("blocked_deal_id")
+  blockedDealId String? @db.Uuid @map("blocked_deal_id")
   blockedDeal   Deal?   @relation("BlockedDeal", fields: [blockedDealId], references: [id], onDelete: SetNull)
 
   blockedShortCode String?   @map("blocked_short_code")
@@ -124,5 +124,6 @@ model RedemptionBlockLog {
   @@index([requestedDealId])
   @@index([blockedDealId])
   @@index([reason])
+
   @@map("RedemptionBlockLog")
 }
