@@ -12,7 +12,8 @@ function extractCodeFromUrl(text: string): string | null {
   // Example QR payloads we want to support:
   //  - "J7YQR"
   //  - "https://yourdomain.com/r/J7YQR"
-  //  - "https://dealina.com/r/J7YQR?x=1"
+  //  - "https://yestodeals.com/r/J7YQR?x=1"
+
 
   const trimmed = text.trim();
 

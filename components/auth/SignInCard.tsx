@@ -59,7 +59,8 @@ export default function SignInCard() {
       <div className="mb-6 flex items-center justify-between">
         <div>
           <h1 className="text-xl font-semibold">
-            {mode === "signin" ? "Sign in to Dealina" : "Create your Dealina account"}
+            {mode === "signin" ? "Sign in to Yes to Deals" : "Create your Yes to Deals account"}
+
           </h1>
           <p className="mt-1 text-sm text-neutral-600">
             Use the same account across your merchant tools.
@@ -136,7 +137,8 @@ export default function SignInCard() {
 
       {/* Small hint */}
       <p className="mt-4 text-[11px] leading-relaxed text-neutral-500">
-        By continuing, you agree to Dealina’s terms of service. We’ll never share your
+        By continuing, you agree to Yes to Deals’ terms of service. We’ll never share your
+
         email with third parties.
       </p>
     </div>

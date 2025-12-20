@@ -116,13 +116,17 @@ export default async function ExplorePage({ searchParams }: ExplorePageProps) {
       <section className="mb-6 rounded-3xl bg-gradient-to-r from-fuchsia-600 via-violet-500 to-emerald-500 p-5 md:p-6 text-white shadow-[0_18px_40px_rgba(60,0,120,0.30)]">
         <div className="grid gap-4 md:grid-cols-[minmax(0,1.7fr)_minmax(0,1fr)] md:items-center">
           <div className="space-y-2 md:space-y-3">
-            <p className="text-[11px] font-semibold uppercase tracking-[0.25em] opacity-80">Dealina</p>
+            <p className="text-[11px] font-semibold uppercase tracking-[0.25em] opacity-80">
+  Yes to Deals
+</p>
+
             <h1 className="text-xl font-semibold leading-snug md:text-2xl lg:text-[26px]">
               Save on local deals near you — no account needed
             </h1>
             <p className="max-w-xl text-sm leading-relaxed text-white/90">
               Find discounts from nearby salons, barbers, food spots and more. Tap any card to see full details,
-              pricing, and your Dealina QR code for redemption.
+              pricing, and your Yes to Deals QR code for redemption.
+
             </p>
             <p className="pt-1 text-[10px] font-semibold uppercase tracking-wide text-white/80">
               1. Pick a deal • 2. Get a QR code • 3. Show it in store to redeem
