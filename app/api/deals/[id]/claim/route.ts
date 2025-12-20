@@ -4,11 +4,7 @@ import type { Prisma } from "@prisma/client";
 import crypto from "crypto";
 
 const QR_TTL_MINUTES = 15;
-
-// Cooldown between NEW QR generations for same device + deal
 const COOLDOWN_SECONDS = 20;
-
-// ✅ Anti-hoarding: max active (unredeemed + unexpired) QRs per device across all deals
 const MAX_ACTIVE_QRS_PER_DEVICE = 1;
 
 function sha256(input: string) {
@@ -71,23 +67,20 @@ async function lockDealAndCheckSoldOut(
   if (!rows || rows.length === 0) return { ok: false, status: 404, error: "Deal not found" };
 
   const deal = rows[0];
-
   if (deal.startsAt > now) return { ok: false, status: 409, error: "Deal has not started yet" };
   if (deal.endsAt < now) return { ok: false, status: 409, error: "Deal has ended" };
 
   const max = deal.maxRedemptions;
-  if (typeof max !== "number" || max <= 0) return { ok: true }; // unlimited
+  if (typeof max !== "number" || max <= 0) return { ok: true };
 
   const redeemedCount = await tx.redemption.count({
     where: { dealId, redeemedAt: { not: null } },
   });
 
   if (redeemedCount >= max) return { ok: false, status: 409, error: "Sold out" };
-
   return { ok: true };
 }
 
-// ✅ Helper: treat null expiresAt as expired (invalid)
 function isStillValid(expiresAt: Date | null | undefined, now: Date) {
   if (!expiresAt) return false;
   return expiresAt.getTime() > now.getTime();
@@ -110,13 +103,12 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
 
     const result = await withTxnRetry(async () => {
       return prisma.$transaction(async (tx) => {
-        // ✅ ensure deal is live + not sold out
         const gate = await lockDealAndCheckSoldOut(tx, dealId);
         if (!gate.ok) return { kind: "ERR" as const, status: gate.status, error: gate.error };
 
         const now = new Date();
 
-        // ✅ 0) Cleanup: unlock expired actives for this device
+        // cleanup expired actives for this device
         await tx.redemption.updateMany({
           where: {
             deviceHash,
@@ -127,7 +119,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
           data: { activeKey: null },
         });
 
-        // ✅ 1) Reuse active QR if it exists & still valid (same deal + same device)
+        // reuse existing active QR if still valid
         const existing = await tx.redemption.findFirst({
           where: { activeKey },
           select: { id: true, shortCode: true, redeemedAt: true, expiresAt: true },
@@ -149,7 +141,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
           }
         }
 
-        // ✅ 2) Anti-hoarding: block if device has other active QR(s) for other deals
+        // anti-hoarding: other active QRs on device
         if (MAX_ACTIVE_QRS_PER_DEVICE > 0) {
           const otherActives = await tx.redemption.findMany({
             where: {
@@ -170,17 +162,17 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
               ? Math.max(1, Math.ceil((soonest.expiresAt.getTime() - now.getTime()) / 1000))
               : QR_TTL_MINUTES * 60;
 
-            // ✅ LOG the block
+            // ✅ Prisma uses camelCase fields
             await tx.redemptionBlockLog.create({
               data: {
-                device_hash: deviceHash,
-                requested_deal_id: dealId,
-                blocked_deal_id: soonest.dealId,
-                blocked_short_code: soonest.shortCode ?? null,
-                blocked_expires_at: soonest.expiresAt ?? null,
+                deviceHash,
+                requestedDealId: dealId,
+                blockedDealId: soonest.dealId,
+                blockedShortCode: soonest.shortCode ?? null,
+                blockedExpiresAt: soonest.expiresAt ?? null,
                 reason: "ACTIVE_QR_EXISTS",
-                retry_after_sec: retryAfterSec,
-                user_agent: userAgent,
+                retryAfterSec,
+                userAgent,
               },
             });
 
@@ -199,7 +191,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
           }
         }
 
-        // ✅ 3) Per-device cooldown (only applies when generating a NEW QR)
+        // cooldown for this deal+device
         const latest = await tx.redemption.findFirst({
           where: { dealId, deviceHash },
           orderBy: { createdAt: "desc" },
@@ -213,14 +205,13 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
           if (ageMs < cooldownMs) {
             const retryAfterSec = Math.ceil((cooldownMs - ageMs) / 1000);
 
-            // ✅ LOG cooldown too
             await tx.redemptionBlockLog.create({
               data: {
-                device_hash: deviceHash,
-                requested_deal_id: dealId,
+                deviceHash,
+                requestedDealId: dealId,
                 reason: "COOLDOWN",
-                retry_after_sec: retryAfterSec,
-                user_agent: userAgent,
+                retryAfterSec,
+                userAgent,
               },
             });
 
@@ -233,7 +224,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
           }
         }
 
-        // ✅ 4) Create new QR (locked to this device+deal for 15 minutes)
+        // create NEW QR
         const shortCode = await generateUniqueShortCode(tx);
         const expiresAt = new Date(Date.now() + QR_TTL_MINUTES * 60 * 1000);
 

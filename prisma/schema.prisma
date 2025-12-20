@@ -94,23 +94,31 @@ model Redemption {
   @@index([expiresAt])
 }
 model RedemptionBlockLog {
-  id           String   @id @default(uuid())
+  id String @id @default(uuid())
 
-  dealId       String?
-  merchantId   String?
-  deviceHash   String?
+  createdAt DateTime @default(now()) @map("created_at")
 
-  reason       String   // e.g. "ANTI_HOARDING", "COOLDOWN", "SOLD_OUT"
-  message      String?
+  deviceHash String @map("device_hash")
 
-  blockedByDealId String?
-  blockedByCode   String?
-  blockedUntil    DateTime?
+  requestedDealId String @map("requested_deal_id")
+  requestedDeal   Deal   @relation("RequestedDeal", fields: [requestedDealId], references: [id], onDelete: Cascade)
 
-  createdAt    DateTime @default(now())
+  blockedDealId String? @map("blocked_deal_id")
+  blockedDeal   Deal?   @relation("BlockedDeal", fields: [blockedDealId], references: [id], onDelete: SetNull)
 
-  @@index([merchantId])
-  @@index([dealId])
-  @@index([deviceHash])
+  blockedShortCode String?   @map("blocked_short_code")
+  blockedExpiresAt DateTime? @map("blocked_expires_at")
+
+  reason String
+
+  retryAfterSec Int?    @map("retry_after_sec")
+  userAgent     String? @map("user_agent")
+
   @@index([createdAt])
+  @@index([deviceHash])
+  @@index([requestedDealId])
+  @@index([blockedDealId])
+  @@index([reason])
+
+  @@map("RedemptionBlockLog")
 }
