@@ -13,7 +13,7 @@ import LogoutButton from "@/components/LogoutButton";
 export const dynamic = "force-dynamic";
 
 export const metadata: Metadata = {
-  title: "Dealina · Local deals with QR codes",
+  title: "Yes to Deals · Local deals with QR codes",
   description:
     "Discover and redeem local discounts with QR codes. No account needed for customers – only merchants manage deals.",
 };
@@ -46,7 +46,7 @@ export default async function RootLayout({
   return (
     <html lang="en">
       <body className="bg-slate-50 text-slate-900">
-        {/* ✅ CLIENT: refresh RSC when auth changes */}
+        {/* ✅ Client: keeps UI in sync after login/logout without refresh */}
         <AuthSync />
 
         <header className="border-b border-slate-200 bg-white">
@@ -55,7 +55,7 @@ export default async function RootLayout({
               <div className="relative h-9 w-9 overflow-hidden rounded-2xl">
                 <Image
                   src="/dealina-logo.png"
-                  alt="Dealina"
+                  alt="Yes to Deals"
                   fill
                   priority
                   sizes="36px"
@@ -65,11 +65,9 @@ export default async function RootLayout({
 
               <div className="flex flex-col leading-tight">
                 <span className="text-sm font-semibold tracking-tight">
-                  Dealina
+                  Yes to Deals
                 </span>
-                <span className="text-[10px] text-slate-400">
-                  Save more locally
-                </span>
+                <span className="text-[10px] text-slate-400">Save more locally</span>
               </div>
             </Link>
 
@@ -111,7 +109,6 @@ export default async function RootLayout({
                     Abuse
                   </Link>
 
-                  {/* ✅ logout is now instant (no refresh needed) */}
                   <LogoutButton />
                 </>
               ) : (

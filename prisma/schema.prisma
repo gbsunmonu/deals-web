@@ -44,6 +44,7 @@ model Deal {
 
   originalPrice Int?
 
+  // Public short code for /r/[shortCode]
   shortCode String? @unique
 
   discountValue Int          @default(0)
@@ -51,7 +52,7 @@ model Deal {
 
   imageUrl String?
 
-  // ✅ how many times the deal can be redeemed total (null/0 = unlimited)
+  // how many times the deal can be redeemed total (null/0 = unlimited)
   maxRedemptions Int?
 
   startsAt DateTime
@@ -62,7 +63,7 @@ model Deal {
 
   redemptions Redemption[]
 
-  // ✅ REQUIRED: opposite relation fields for RedemptionBlockLog
+  // Opposite relation fields for RedemptionBlockLog
   requestedBlockLogs RedemptionBlockLog[] @relation("RequestedDeal")
   blockedBlockLogs   RedemptionBlockLog[] @relation("BlockedDeal")
 
@@ -76,18 +77,21 @@ model Redemption {
   dealId String @db.Uuid
   deal   Deal   @relation(fields: [dealId], references: [id])
 
+  // internal unique code (if you still use it)
   code      String @unique
+
+  // public code shown in /r/[shortCode]
   shortCode String @unique
 
   redeemedAt DateTime?
 
-  // ✅ QR expiry (set in code when creating QR)
-  expiresAt DateTime?
+  // QR expiry (required)
+  expiresAt DateTime
 
-  // ✅ device lock (optional until you fully enforce it)
+  // device lock
   deviceHash String?
 
-  // ✅ unique active lock key while QR is active
+  // unique active lock key while QR is active
   activeKey String? @unique
 
   createdAt DateTime @default(now())

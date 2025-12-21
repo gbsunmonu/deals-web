@@ -1,7 +1,7 @@
 // app/merchant/layout.tsx
+import { redirect } from "next/navigation";
 import { getServerSupabaseRSC } from "@/lib/supabase";
 import { prisma } from "@/lib/prisma";
-import { redirect } from "next/navigation";
 
 export const dynamic = "force-dynamic";
 
@@ -15,20 +15,20 @@ export default async function MerchantLayout({
     data: { user },
   } = await supabase.auth.getUser();
 
-  // Not logged in → go to merchant login
+  // 1) Must be logged in
   if (!user) {
     redirect("/login?returnTo=/merchant/profile");
   }
 
-  // Logged in but not a merchant → go to merchant onboarding (or a simple page)
+  // 2) Must have a Merchant row
   const merchant = await prisma.merchant.findUnique({
     where: { userId: user.id as any },
     select: { id: true },
   });
 
   if (!merchant) {
-    // You can change this later to /merchant/onboarding
-    redirect("/merchant");
+    // If they logged in but don't have a merchant profile row yet
+    redirect("/merchant/profile/edit");
   }
 
   return <>{children}</>;

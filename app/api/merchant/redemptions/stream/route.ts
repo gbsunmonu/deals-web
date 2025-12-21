@@ -5,46 +5,15 @@ import { getServerSupabaseRSC } from "@/lib/supabase";
 
 export const dynamic = "force-dynamic";
 
-function sseHeaders() {
-  return {
-    "Content-Type": "text/event-stream; charset=utf-8",
-    "Cache-Control": "no-cache, no-transform",
-    Connection: "keep-alive",
-    // Helps some proxies (esp. Nginx) avoid buffering:
-    "X-Accel-Buffering": "no",
-  };
-}
+const POLL_MS = 2500; // how often we check DB for new redemptions
+const KEEPALIVE_MS = 15000; // send keepalive ping to prevent proxies closing SSE
 
-type RecentRedemptionRow = {
-  id: string;
-  redeemedAt: string | null;
-  shortCode: string | null;
-  deal: {
-    id: string;
-    title: string;
-    discountType: string;
-    discountValue: number;
-    originalPrice: number | null;
-  };
-};
-
-function toRow(r: any): RecentRedemptionRow {
-  return {
-    id: r.id,
-    redeemedAt: r.redeemedAt ? r.redeemedAt.toISOString() : null,
-    shortCode: r.shortCode ?? null,
-    deal: {
-      id: r.deal.id,
-      title: r.deal.title,
-      discountType: String(r.deal.discountType),
-      discountValue: Number(r.deal.discountValue ?? 0),
-      originalPrice: r.deal.originalPrice ?? null,
-    },
-  };
+function sseFormat(event: string, data: any) {
+  return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
 }
 
 export async function GET(req: NextRequest) {
-  // ✅ Merchant auth required
+  // ✅ Merchant auth
   const supabase = await getServerSupabaseRSC();
   const {
     data: { user },
@@ -54,9 +23,9 @@ export async function GET(req: NextRequest) {
     return new Response("Unauthorized", { status: 401 });
   }
 
-  // ✅ Map Supabase user -> Merchant.id
+  // ✅ Resolve merchantId via Merchant.userId
   const merchant = await prisma.merchant.findUnique({
-    where: { userId: user.id },
+    where: { userId: user.id as any },
     select: { id: true },
   });
 
@@ -64,32 +33,76 @@ export async function GET(req: NextRequest) {
     return new Response("Forbidden", { status: 403 });
   }
 
-  const url = new URL(req.url);
-  const sinceParam = url.searchParams.get("since") || "";
-  let since = sinceParam ? new Date(sinceParam) : new Date(Date.now() - 60_000);
-  if (Number.isNaN(since.getTime())) since = new Date(Date.now() - 60_000);
+  const merchantId = merchant.id;
 
-  let lastSentIso = since.toISOString();
+  // since cursor (ISO string)
+  const sinceParam = req.nextUrl.searchParams.get("since") || "";
+  const sinceDate = sinceParam ? new Date(sinceParam) : new Date(Date.now() - 60_000);
+
+  // If invalid, fallback
+  const since =
+    Number.isNaN(sinceDate.getTime()) ? new Date(Date.now() - 60_000) : sinceDate;
 
   const encoder = new TextEncoder();
 
+  let closed = false;
+  let pollTimer: NodeJS.Timeout | null = null;
+  let keepAliveTimer: NodeJS.Timeout | null = null;
+
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
-      const send = (text: string) => controller.enqueue(encoder.encode(text));
-
-      // initial hello
-      send(`event: hello\ndata: ${JSON.stringify({ ok: true })}\n\n`);
-
-      const tick = async () => {
+      const send = (chunk: string) => {
+        if (closed) return;
         try {
-          // Pull anything newer than lastSentIso for this merchant
+          controller.enqueue(encoder.encode(chunk));
+        } catch {
+          // controller already closed
+          closed = true;
+        }
+      };
+
+      const cleanup = () => {
+        if (closed) return;
+        closed = true;
+
+        if (pollTimer) clearInterval(pollTimer);
+        if (keepAliveTimer) clearInterval(keepAliveTimer);
+
+        pollTimer = null;
+        keepAliveTimer = null;
+
+        try {
+          controller.close();
+        } catch {
+          // ignore
+        }
+      };
+
+      // ✅ If client disconnects / navigates away, stop timers immediately
+      req.signal.addEventListener("abort", cleanup);
+
+      // Initial hello (optional)
+      send(sseFormat("hello", { ok: true }));
+
+      // Keepalive ping so some proxies/browsers keep the connection open
+      keepAliveTimer = setInterval(() => {
+        send(`: ping ${Date.now()}\n\n`);
+      }, KEEPALIVE_MS);
+
+      // Poll DB for new redemptions and push over SSE
+      let cursor = since;
+
+      pollTimer = setInterval(async () => {
+        if (closed) return;
+
+        try {
           const rows = await prisma.redemption.findMany({
             where: {
-              redeemedAt: { not: null, gt: new Date(lastSentIso) },
-              deal: { merchantId: merchant.id },
+              redeemedAt: { not: null, gt: cursor },
+              deal: { merchantId },
             },
             orderBy: { redeemedAt: "asc" },
-            take: 50,
+            take: 25,
             select: {
               id: true,
               redeemedAt: true,
@@ -106,43 +119,53 @@ export async function GET(req: NextRequest) {
             },
           });
 
-          if (rows.length) {
-            const payload = rows.map(toRow);
+          if (!rows.length) return;
 
-            // update cursor to newest redeemedAt
-            const newest = rows[rows.length - 1].redeemedAt!;
-            lastSentIso = newest.toISOString();
+          // advance cursor to newest redeemedAt in returned rows
+          const newest = rows
+            .map((r) => r.redeemedAt)
+            .filter(Boolean)
+            .sort((a, b) => a!.getTime() - b!.getTime())
+            .pop();
 
-            send(`event: redemption\ndata: ${JSON.stringify({ rows: payload })}\n\n`);
-          } else {
-            // keep-alive ping
-            send(`event: ping\ndata: ${JSON.stringify({ t: Date.now() })}\n\n`);
-          }
-        } catch (e: any) {
+          if (newest) cursor = newest;
+
+          // Send to client
           send(
-            `event: error\ndata: ${JSON.stringify({
-              error: e?.message || "stream error",
-            })}\n\n`
+            sseFormat("redemption", {
+              rows: rows.map((r) => ({
+                id: r.id,
+                redeemedAt: r.redeemedAt ? r.redeemedAt.toISOString() : null,
+                shortCode: r.shortCode,
+                deal: r.deal,
+              })),
+            })
           );
+        } catch (e) {
+          // If something goes wrong, end stream cleanly
+          send(sseFormat("error", { message: "Stream error" }));
+          cleanup();
         }
-      };
-
-      // ✅ SSE "push": server sends updates regularly (connection stays open)
-      const interval = setInterval(tick, 2000);
-
-      // fire immediately too
-      tick();
-
-      // cleanup on disconnect
-      (controller as any).closeStream = () => clearInterval(interval);
+      }, POLL_MS);
     },
 
-    cancel(reason) {
-      // Called when client disconnects
-      // @ts-ignore
-      this.closeStream?.();
+    cancel() {
+      // ✅ Called when the consumer cancels the stream
+      closed = true;
+      if (pollTimer) clearInterval(pollTimer);
+      if (keepAliveTimer) clearInterval(keepAliveTimer);
+      pollTimer = null;
+      keepAliveTimer = null;
     },
   });
 
-  return new Response(stream, { headers: sseHeaders() });
+  return new Response(stream, {
+    headers: {
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "Cache-Control": "no-cache, no-transform",
+      Connection: "keep-alive",
+      // Helps on some platforms
+      "X-Accel-Buffering": "no",
+    },
+  });
 }

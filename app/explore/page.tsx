@@ -22,14 +22,22 @@ function isPercent(discountType: any) {
   return discountType === "PERCENT" || discountType === "PERCENTAGE";
 }
 
-function computeSaveAmount(originalPrice: number | null, discountValue: number, discountType: any) {
+function computeSaveAmount(
+  originalPrice: number | null,
+  discountValue: number,
+  discountType: any
+) {
   const pct = clampPct(Number(discountValue ?? 0));
   if (!originalPrice || pct <= 0 || !isPercent(discountType)) return null;
   return Math.round((originalPrice * pct) / 100);
 }
 
 // ✅ HOT DEAL RULE: save >= ₦1000 OR discount >= 45%
-function computeIsHotDeal(originalPrice: number | null, discountValue: number, discountType: any) {
+function computeIsHotDeal(
+  originalPrice: number | null,
+  discountValue: number,
+  discountType: any
+) {
   const pct = clampPct(Number(discountValue ?? 0));
   const save = computeSaveAmount(originalPrice, pct, discountType);
   return (save != null && save >= 1000) || pct >= 45;
@@ -64,7 +72,9 @@ export default async function ExplorePage({ searchParams }: ExplorePageProps) {
     orderBy: { category: "asc" },
   });
 
-  const categories = categoryRows.map((c) => c.category).filter((c): c is string => !!c);
+  const categories = categoryRows
+    .map((c) => c.category)
+    .filter((c): c is string => !!c);
 
   const deals = await prisma.deal.findMany({
     where: {
@@ -99,8 +109,16 @@ export default async function ExplorePage({ searchParams }: ExplorePageProps) {
 
   // ✅ HOT FIRST SORT (server-side)
   const sortedDeals = [...deals].sort((a, b) => {
-    const aHot = computeIsHotDeal(a.originalPrice ?? null, a.discountValue, a.discountType);
-    const bHot = computeIsHotDeal(b.originalPrice ?? null, b.discountValue, b.discountType);
+    const aHot = computeIsHotDeal(
+      a.originalPrice ?? null,
+      a.discountValue,
+      a.discountType
+    );
+    const bHot = computeIsHotDeal(
+      b.originalPrice ?? null,
+      b.discountValue,
+      b.discountType
+    );
     if (aHot !== bHot) return aHot ? -1 : 1;
 
     const aPct = clampPct(a.discountValue);
@@ -117,17 +135,19 @@ export default async function ExplorePage({ searchParams }: ExplorePageProps) {
         <div className="grid gap-4 md:grid-cols-[minmax(0,1.7fr)_minmax(0,1fr)] md:items-center">
           <div className="space-y-2 md:space-y-3">
             <p className="text-[11px] font-semibold uppercase tracking-[0.25em] opacity-80">
-  Yes to Deals
-</p>
+              Yes to Deals
+            </p>
 
             <h1 className="text-xl font-semibold leading-snug md:text-2xl lg:text-[26px]">
               Save on local deals near you — no account needed
             </h1>
-            <p className="max-w-xl text-sm leading-relaxed text-white/90">
-              Find discounts from nearby salons, barbers, food spots and more. Tap any card to see full details,
-              pricing, and your Yes to Deals QR code for redemption.
 
+            <p className="max-w-xl text-sm leading-relaxed text-white/90">
+              Find discounts from nearby salons, barbers, food spots and more.
+              Tap any card to see full details, pricing, and your Yes to Deals QR
+              code for redemption.
             </p>
+
             <p className="pt-1 text-[10px] font-semibold uppercase tracking-wide text-white/80">
               1. Pick a deal • 2. Get a QR code • 3. Show it in store to redeem
             </p>
@@ -135,21 +155,39 @@ export default async function ExplorePage({ searchParams }: ExplorePageProps) {
 
           <div className="grid gap-3 md:grid-cols-3">
             <div className="rounded-2xl bg-white/10 p-3 shadow-sm backdrop-blur-sm">
-              <p className="text-[10px] font-semibold uppercase tracking-wide text-white/80">Live deals today</p>
-              <p className="mt-1 text-xl font-semibold">{liveDealsCount.toLocaleString("en-NG")}</p>
-              <p className="mt-1 text-[11px] leading-snug text-white/80">Available to redeem with a QR code.</p>
+              <p className="text-[10px] font-semibold uppercase tracking-wide text-white/80">
+                Live deals today
+              </p>
+              <p className="mt-1 text-xl font-semibold">
+                {liveDealsCount.toLocaleString("en-NG")}
+              </p>
+              <p className="mt-1 text-[11px] leading-snug text-white/80">
+                Available to redeem with a QR code.
+              </p>
             </div>
 
             <div className="rounded-2xl bg-white/10 p-3 shadow-sm backdrop-blur-sm">
-              <p className="text-[10px] font-semibold uppercase tracking-wide text-white/80">Starting soon</p>
-              <p className="mt-1 text-xl font-semibold">{startingSoonCount.toLocaleString("en-NG")}</p>
-              <p className="mt-1 text-[11px] leading-snug text-white/80">Upcoming promotions already planned.</p>
+              <p className="text-[10px] font-semibold uppercase tracking-wide text-white/80">
+                Starting soon
+              </p>
+              <p className="mt-1 text-xl font-semibold">
+                {startingSoonCount.toLocaleString("en-NG")}
+              </p>
+              <p className="mt-1 text-[11px] leading-snug text-white/80">
+                Upcoming promotions already planned.
+              </p>
             </div>
 
             <div className="rounded-2xl bg-white/10 p-3 shadow-sm backdrop-blur-sm">
-              <p className="text-[10px] font-semibold uppercase tracking-wide text-white/80">Top discount today</p>
-              <p className="mt-1 text-xl font-semibold">{topDiscountValue > 0 ? `${topDiscountValue}% OFF` : "—"}</p>
-              <p className="mt-1 text-[11px] leading-snug text-white/80">Highest percentage off among live deals.</p>
+              <p className="text-[10px] font-semibold uppercase tracking-wide text-white/80">
+                Top discount today
+              </p>
+              <p className="mt-1 text-xl font-semibold">
+                {topDiscountValue > 0 ? `${topDiscountValue}% OFF` : "—"}
+              </p>
+              <p className="mt-1 text-[11px] leading-snug text-white/80">
+                Highest percentage off among live deals.
+              </p>
             </div>
           </div>
         </div>
@@ -159,7 +197,10 @@ export default async function ExplorePage({ searchParams }: ExplorePageProps) {
       <section className="mb-6 rounded-2xl border border-slate-200 bg-white/80 p-4 shadow-sm">
         <form className="flex flex-col gap-3 md:flex-row md:items-center md:gap-4">
           <div className="flex-1">
-            <label htmlFor="q" className="mb-1 block text-xs font-medium uppercase tracking-wide text-slate-500">
+            <label
+              htmlFor="q"
+              className="mb-1 block text-xs font-medium uppercase tracking-wide text-slate-500"
+            >
               Search deals
             </label>
             <input
@@ -202,7 +243,10 @@ export default async function ExplorePage({ searchParams }: ExplorePageProps) {
             </button>
 
             {(q || category) && (
-              <Link href="/explore" className="text-xs font-medium text-slate-500 underline-offset-2 hover:underline">
+              <Link
+                href="/explore"
+                className="text-xs font-medium text-slate-500 underline-offset-2 hover:underline"
+              >
                 Clear
               </Link>
             )}

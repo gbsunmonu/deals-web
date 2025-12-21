@@ -2,7 +2,7 @@
 import { notFound } from "next/navigation";
 import Link from "next/link";
 import prisma from "@/lib/prisma";
-import DealQrInline from "@/components/DealQrInline";
+import GetRedeemQrButton from "./GetRedeemQrButton";
 
 // In Next 16, params is a Promise in server components.
 type DealDetailPageProps = {
@@ -17,9 +17,7 @@ function formatNaira(value: number | null) {
 export default async function DealDetailPage({ params }: DealDetailPageProps) {
   const { id } = await params;
 
-  if (!id) {
-    return notFound();
-  }
+  if (!id) return notFound();
 
   const deal = await prisma.deal.findUnique({
     where: { id },
@@ -31,17 +29,14 @@ export default async function DealDetailPage({ params }: DealDetailPageProps) {
           city: true,
           address: true,
           phone: true,
-          // website is still selected in case we need it later,
-          // but we do NOT render it to avoid sending traffic out.
+          // still selected if needed later, but not rendered
           website: true,
         },
       },
     },
   });
 
-  if (!deal) {
-    return notFound();
-  }
+  if (!deal) return notFound();
 
   const original = deal.originalPrice ?? 0;
 
@@ -96,7 +91,7 @@ export default async function DealDetailPage({ params }: DealDetailPageProps) {
 
       {/* TOP: Image + summary */}
       <section className="grid gap-6 md:grid-cols-[minmax(0,1.7fr)_minmax(0,1.3fr)]">
-        {/* IMAGE – fixed aspect so it’s not too tall */}
+        {/* IMAGE */}
         <div className="aspect-[16/9] w-full overflow-hidden rounded-3xl border border-slate-200 bg-slate-900">
           {deal.imageUrl ? (
             // eslint-disable-next-line @next/next/no-img-element
@@ -112,7 +107,7 @@ export default async function DealDetailPage({ params }: DealDetailPageProps) {
           )}
         </div>
 
-        {/* DEAL SUMMARY – flex so content hugs top, no extra white inside */}
+        {/* DEAL SUMMARY */}
         <div className="flex h-full flex-col rounded-3xl border border-slate-200 bg-white p-4 shadow-sm">
           <header className="flex items-start justify-between gap-2">
             <div>
@@ -120,7 +115,7 @@ export default async function DealDetailPage({ params }: DealDetailPageProps) {
                 Deal summary
               </h2>
               <p className="mt-1 text-xs text-slate-500">
-                Show your QR code at checkout to redeem this price.
+                Generate a QR code and show it at checkout to redeem this price.
               </p>
             </div>
 
@@ -225,16 +220,26 @@ export default async function DealDetailPage({ params }: DealDetailPageProps) {
               </div>
             )}
           </div>
+
+          {/* ✅ NEW: Get QR button (redirects to /r/[shortCode]) */}
+          <div className="mt-4">
+            {statusLabel === "Expired" ? (
+              <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600">
+                This deal has expired, so you can’t generate a redeem QR.
+              </div>
+            ) : (
+              <GetRedeemQrButton dealId={deal.id} />
+            )}
+          </div>
         </div>
       </section>
 
-      {/* LOWER: title + merchant + QR */}
+      {/* LOWER: title + merchant */}
       <section className="mt-4 grid gap-6 md:grid-cols-[minmax(0,1.7fr)_minmax(0,1.3fr)]">
         {/* Left: title + description */}
         <div>
-          <h1 className="text-xl font-semibold text-slate-900">
-            {deal.title}
-          </h1>
+          <h1 className="text-xl font-semibold text-slate-900">{deal.title}</h1>
+
           {deal.description && (
             <p className="mt-2 text-sm text-slate-600 whitespace-pre-line">
               {deal.description}
@@ -257,9 +262,8 @@ export default async function DealDetailPage({ params }: DealDetailPageProps) {
           </div>
         </div>
 
-        {/* Right: merchant + QR stacked */}
+        {/* Right: merchant card */}
         <div className="space-y-4">
-          {/* Merchant card */}
           <section className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
             <h3 className="text-sm font-semibold text-slate-900">
               Where you&apos;ll redeem this deal
@@ -285,9 +289,6 @@ export default async function DealDetailPage({ params }: DealDetailPageProps) {
               </p>
             )}
 
-            {/* NOTE: we intentionally do NOT render website here
-                because we don't want to send traffic to merchant sites. */}
-
             <div className="mt-4 flex flex-wrap gap-3 text-xs">
               <a
                 href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(
@@ -310,13 +311,16 @@ export default async function DealDetailPage({ params }: DealDetailPageProps) {
             </div>
           </section>
 
-          {/* QR card */}
+          {/* ✅ Note: QR rendering now happens on /r/[shortCode], not here */}
           <section className="rounded-3xl border border-slate-200 bg-white p-4 shadow-sm">
-            <DealQrInline
-              dealId={deal.id}
-              dealTitle={deal.title}
-              expiresAtIso={deal.endsAt.toISOString()}
-            />
+            <p className="text-sm font-semibold text-slate-900">
+              How to redeem
+            </p>
+            <p className="mt-1 text-sm text-slate-600">
+              Tap <span className="font-semibold">Get QR code</span> above. You
+              will be taken to a QR page that expires in 15 minutes and is
+              locked to your device.
+            </p>
           </section>
         </div>
       </section>

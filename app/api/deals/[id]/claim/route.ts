@@ -114,7 +114,8 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
             deviceHash,
             activeKey: { not: null },
             redeemedAt: null,
-            OR: [{ expiresAt: null }, { expiresAt: { lte: now } }],
+           expiresAt: { lte: now },
+
           },
           data: { activeKey: null },
         });
