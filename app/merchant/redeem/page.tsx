@@ -7,7 +7,6 @@ import RedeemClient, { type RecentRedemptionRow } from "./redeem-client";
 export const dynamic = "force-dynamic";
 
 export default async function MerchantRedeemPage() {
-  // ✅ Auth (Supabase user)
   const supabase = await getServerSupabaseRSC();
   const {
     data: { user },
@@ -15,18 +14,13 @@ export default async function MerchantRedeemPage() {
 
   if (!user) redirect("/login");
 
-  // ✅ Map Supabase user -> Merchant row (Merchant.userId)
   const merchant = await prisma.merchant.findUnique({
-    where: { userId: user.id },
+    where: { userId: user.id as any },
     select: { id: true, name: true },
   });
 
-  if (!merchant) {
-    // If you have a better route for onboarding, replace this.
-    redirect("/merchant/profile");
-  }
+  if (!merchant) redirect("/merchant/profile");
 
-  // ✅ Merchant-only recent redemptions
   const recent = await prisma.redemption.findMany({
     where: {
       redeemedAt: { not: null },

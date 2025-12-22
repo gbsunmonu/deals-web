@@ -4,7 +4,6 @@ import Link from "next/link";
 import prisma from "@/lib/prisma";
 import GetRedeemQrButton from "./GetRedeemQrButton";
 
-// In Next 16, params is a Promise in server components.
 type DealDetailPageProps = {
   params: Promise<{ id: string }>;
 };
@@ -16,7 +15,6 @@ function formatNaira(value: number | null) {
 
 export default async function DealDetailPage({ params }: DealDetailPageProps) {
   const { id } = await params;
-
   if (!id) return notFound();
 
   const deal = await prisma.deal.findUnique({
@@ -29,7 +27,6 @@ export default async function DealDetailPage({ params }: DealDetailPageProps) {
           city: true,
           address: true,
           phone: true,
-          // still selected if needed later, but not rendered
           website: true,
         },
       },
@@ -91,7 +88,6 @@ export default async function DealDetailPage({ params }: DealDetailPageProps) {
 
       {/* TOP: Image + summary */}
       <section className="grid gap-6 md:grid-cols-[minmax(0,1.7fr)_minmax(0,1.3fr)]">
-        {/* IMAGE */}
         <div className="aspect-[16/9] w-full overflow-hidden rounded-3xl border border-slate-200 bg-slate-900">
           {deal.imageUrl ? (
             // eslint-disable-next-line @next/next/no-img-element
@@ -107,7 +103,6 @@ export default async function DealDetailPage({ params }: DealDetailPageProps) {
           )}
         </div>
 
-        {/* DEAL SUMMARY */}
         <div className="flex h-full flex-col rounded-3xl border border-slate-200 bg-white p-4 shadow-sm">
           <header className="flex items-start justify-between gap-2">
             <div>
@@ -115,7 +110,7 @@ export default async function DealDetailPage({ params }: DealDetailPageProps) {
                 Deal summary
               </h2>
               <p className="mt-1 text-xs text-slate-500">
-                Generate a QR code and show it at checkout to redeem this price.
+                Generate a QR and show it at checkout to redeem.
               </p>
             </div>
 
@@ -126,7 +121,6 @@ export default async function DealDetailPage({ params }: DealDetailPageProps) {
             </span>
           </header>
 
-          {/* PRICES */}
           <div className="mt-3 grid grid-cols-2 gap-4 border-b border-slate-100 pb-3 text-sm">
             <div>
               <p className="text-[11px] font-semibold uppercase text-slate-500">
@@ -146,7 +140,6 @@ export default async function DealDetailPage({ params }: DealDetailPageProps) {
             </div>
           </div>
 
-          {/* Savings block */}
           <div className="mt-3 flex-1">
             {hasDiscount && savingsAmount != null && savingsAmount > 0 ? (
               <div className="flex h-full items-stretch gap-3 rounded-2xl bg-emerald-50 px-4 py-3 min-h-[96px]">
@@ -220,23 +213,11 @@ export default async function DealDetailPage({ params }: DealDetailPageProps) {
               </div>
             )}
           </div>
-
-          {/* ✅ NEW: Get QR button (redirects to /r/[shortCode]) */}
-          <div className="mt-4">
-            {statusLabel === "Expired" ? (
-              <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600">
-                This deal has expired, so you can’t generate a redeem QR.
-              </div>
-            ) : (
-              <GetRedeemQrButton dealId={deal.id} />
-            )}
-          </div>
         </div>
       </section>
 
-      {/* LOWER: title + merchant */}
+      {/* LOWER: title + merchant + QR */}
       <section className="mt-4 grid gap-6 md:grid-cols-[minmax(0,1.7fr)_minmax(0,1.3fr)]">
-        {/* Left: title + description */}
         <div>
           <h1 className="text-xl font-semibold text-slate-900">{deal.title}</h1>
 
@@ -262,7 +243,6 @@ export default async function DealDetailPage({ params }: DealDetailPageProps) {
           </div>
         </div>
 
-        {/* Right: merchant card */}
         <div className="space-y-4">
           <section className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
             <h3 className="text-sm font-semibold text-slate-900">
@@ -311,16 +291,18 @@ export default async function DealDetailPage({ params }: DealDetailPageProps) {
             </div>
           </section>
 
-          {/* ✅ Note: QR rendering now happens on /r/[shortCode], not here */}
-          <section className="rounded-3xl border border-slate-200 bg-white p-4 shadow-sm">
-            <p className="text-sm font-semibold text-slate-900">
-              How to redeem
+          {/* ✅ QR CTA card */}
+          <section className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
+            <h3 className="text-sm font-semibold text-slate-900">
+              Get your QR code
+            </h3>
+            <p className="mt-1 text-xs text-slate-500">
+              No account needed. Tap below to generate your redeem QR.
             </p>
-            <p className="mt-1 text-sm text-slate-600">
-              Tap <span className="font-semibold">Get QR code</span> above. You
-              will be taken to a QR page that expires in 15 minutes and is
-              locked to your device.
-            </p>
+
+            <div className="mt-4">
+              <GetRedeemQrButton dealId={deal.id} />
+            </div>
           </section>
         </div>
       </section>

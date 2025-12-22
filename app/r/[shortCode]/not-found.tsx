@@ -3,24 +3,30 @@ import Link from "next/link";
 
 export default function NotFound() {
   return (
-    <main className="mx-auto max-w-2xl px-4 py-10">
+    <main className="mx-auto max-w-md px-4 py-12">
       <div className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
-        <h1 className="text-xl font-semibold text-slate-900">Code not found</h1>
-        <p className="mt-2 text-sm text-slate-600">
-          This redeem link is invalid or expired.
+        <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-slate-500">
+          Yes to Deals
         </p>
-        <div className="mt-4 flex gap-2">
+        <h1 className="mt-2 text-2xl font-semibold text-slate-900">
+          QR not found
+        </h1>
+        <p className="mt-2 text-sm text-slate-600">
+          This QR code is invalid or has been removed.
+        </p>
+
+        <div className="mt-5 flex gap-2">
           <Link
             href="/explore"
-            className="inline-flex rounded-full bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-700"
+            className="flex-1 rounded-full bg-emerald-600 px-4 py-2 text-center text-sm font-semibold text-white hover:bg-emerald-700"
           >
             Explore deals
           </Link>
           <Link
-            href="/login?returnTo=/merchant/profile"
-            className="inline-flex rounded-full border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50"
+            href="/"
+            className="flex-1 rounded-full border border-slate-200 px-4 py-2 text-center text-sm font-semibold text-slate-700 hover:bg-slate-50"
           >
-            Merchant login
+            Home
           </Link>
         </div>
       </div>

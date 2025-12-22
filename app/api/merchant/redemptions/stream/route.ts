@@ -1,18 +1,29 @@
 // app/api/merchant/redemptions/stream/route.ts
-import { NextRequest } from "next/server";
+import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { getServerSupabaseRSC } from "@/lib/supabase";
 
 export const dynamic = "force-dynamic";
+export const runtime = "nodejs";
 
-const POLL_MS = 2500; // how often we check DB for new redemptions
-const KEEPALIVE_MS = 15000; // send keepalive ping to prevent proxies closing SSE
+type StreamRow = {
+  id: string;
+  redeemedAt: string | null;
+  shortCode: string | null;
+  deal: {
+    id: string;
+    title: string;
+    discountType: string;
+    discountValue: number;
+    originalPrice: number | null;
+  };
+};
 
-function sseFormat(event: string, data: any) {
+function sseEvent(event: string, data: any) {
   return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
 }
 
-export async function GET(req: NextRequest) {
+export async function GET() {
   // ✅ Merchant auth
   const supabase = await getServerSupabaseRSC();
   const {
@@ -20,89 +31,57 @@ export async function GET(req: NextRequest) {
   } = await supabase.auth.getUser();
 
   if (!user) {
-    return new Response("Unauthorized", { status: 401 });
+    return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   }
 
-  // ✅ Resolve merchantId via Merchant.userId
   const merchant = await prisma.merchant.findUnique({
     where: { userId: user.id as any },
-    select: { id: true },
+    select: { id: true, name: true },
   });
 
   if (!merchant) {
-    return new Response("Forbidden", { status: 403 });
+    return NextResponse.json({ error: "not_a_merchant" }, { status: 403 });
   }
-
-  const merchantId = merchant.id;
-
-  // since cursor (ISO string)
-  const sinceParam = req.nextUrl.searchParams.get("since") || "";
-  const sinceDate = sinceParam ? new Date(sinceParam) : new Date(Date.now() - 60_000);
-
-  // If invalid, fallback
-  const since =
-    Number.isNaN(sinceDate.getTime()) ? new Date(Date.now() - 60_000) : sinceDate;
 
   const encoder = new TextEncoder();
 
-  let closed = false;
-  let pollTimer: NodeJS.Timeout | null = null;
-  let keepAliveTimer: NodeJS.Timeout | null = null;
+  // Start “cursor” from now so we only stream NEW redemptions
+  let lastSent = new Date();
 
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
-      const send = (chunk: string) => {
+      let closed = false;
+
+      const send = (txt: string) => {
         if (closed) return;
         try {
-          controller.enqueue(encoder.encode(chunk));
+          controller.enqueue(encoder.encode(txt));
         } catch {
-          // controller already closed
+          // Controller already closed
           closed = true;
         }
       };
 
-      const cleanup = () => {
-        if (closed) return;
-        closed = true;
+      // immediately tell client stream is ready
+      send(sseEvent("ready", { ok: true, merchantId: merchant.id }));
 
-        if (pollTimer) clearInterval(pollTimer);
-        if (keepAliveTimer) clearInterval(keepAliveTimer);
+      // keepalive ping so proxies don’t kill the connection
+      const ping = setInterval(() => {
+        send(`event: ping\ndata: ${Date.now()}\n\n`);
+      }, 15000);
 
-        pollTimer = null;
-        keepAliveTimer = null;
-
-        try {
-          controller.close();
-        } catch {
-          // ignore
-        }
-      };
-
-      // ✅ If client disconnects / navigates away, stop timers immediately
-      req.signal.addEventListener("abort", cleanup);
-
-      // Initial hello (optional)
-      send(sseFormat("hello", { ok: true }));
-
-      // Keepalive ping so some proxies/browsers keep the connection open
-      keepAliveTimer = setInterval(() => {
-        send(`: ping ${Date.now()}\n\n`);
-      }, KEEPALIVE_MS);
-
-      // Poll DB for new redemptions and push over SSE
-      let cursor = since;
-
-      pollTimer = setInterval(async () => {
+      // poll DB for new redemptions
+      const poll = setInterval(async () => {
         if (closed) return;
 
         try {
           const rows = await prisma.redemption.findMany({
             where: {
-              redeemedAt: { not: null, gt: cursor },
-              deal: { merchantId },
+              redeemedAt: { not: null, gt: lastSent },
+              deal: { merchantId: merchant.id },
             },
             orderBy: { redeemedAt: "asc" },
-            take: 25,
+            take: 50,
             select: {
               id: true,
               redeemedAt: true,
@@ -121,51 +100,66 @@ export async function GET(req: NextRequest) {
 
           if (!rows.length) return;
 
-          // advance cursor to newest redeemedAt in returned rows
-          const newest = rows
-            .map((r) => r.redeemedAt)
-            .filter(Boolean)
-            .sort((a, b) => a!.getTime() - b!.getTime())
-            .pop();
+          // advance cursor
+          const newest = rows[rows.length - 1].redeemedAt!;
+          lastSent = new Date(newest);
 
-          if (newest) cursor = newest;
+          // push each row
+          for (const r of rows) {
+            const payload: StreamRow = {
+              id: r.id,
+              redeemedAt: r.redeemedAt ? r.redeemedAt.toISOString() : null,
+              shortCode: r.shortCode ?? null,
+              deal: {
+                id: r.deal.id,
+                title: r.deal.title,
+                discountType: String(r.deal.discountType),
+                discountValue: Number(r.deal.discountValue ?? 0),
+                originalPrice: r.deal.originalPrice ?? null,
+              },
+            };
 
-          // Send to client
-          send(
-            sseFormat("redemption", {
-              rows: rows.map((r) => ({
-                id: r.id,
-                redeemedAt: r.redeemedAt ? r.redeemedAt.toISOString() : null,
-                shortCode: r.shortCode,
-                deal: r.deal,
-              })),
-            })
-          );
+            send(sseEvent("redemption", payload));
+          }
         } catch (e) {
-          // If something goes wrong, end stream cleanly
-          send(sseFormat("error", { message: "Stream error" }));
-          cleanup();
+          // don’t crash stream
+          send(sseEvent("error", { error: "poll_failed" }));
         }
-      }, POLL_MS);
-    },
+      }, 500);
 
+      // cleanup on close
+      const cleanup = () => {
+        if (closed) return;
+        closed = true;
+        clearInterval(ping);
+        clearInterval(poll);
+        try {
+          controller.close();
+        } catch {
+          // ignore
+        }
+      };
+
+      // If client disconnects, Next/Node will typically tear it down.
+      // This keeps us safe even if it doesn’t:
+      (globalThis as any).__ytd_cleanup = cleanup;
+    },
     cancel() {
-      // ✅ Called when the consumer cancels the stream
-      closed = true;
-      if (pollTimer) clearInterval(pollTimer);
-      if (keepAliveTimer) clearInterval(keepAliveTimer);
-      pollTimer = null;
-      keepAliveTimer = null;
+      // close intervals when client disconnects
+      try {
+        const fn = (globalThis as any).__ytd_cleanup;
+        if (typeof fn === "function") fn();
+      } catch {
+        // ignore
+      }
     },
   });
 
-  return new Response(stream, {
+  return new NextResponse(stream, {
     headers: {
       "Content-Type": "text/event-stream; charset=utf-8",
       "Cache-Control": "no-cache, no-transform",
       Connection: "keep-alive",
-      // Helps on some platforms
-      "X-Accel-Buffering": "no",
     },
   });
 }

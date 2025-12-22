@@ -1,82 +1,75 @@
-// app/deals/[id]/GetRedeemQrButton.tsx
 "use client";
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 
-function getOrCreateDeviceId(): string {
-  const key = "ytd_device_id";
-  const existing =
-    typeof window !== "undefined" ? localStorage.getItem(key) : null;
-  if (existing) return existing;
+type Props = {
+  dealId: string;
+};
 
-  const created =
-    typeof crypto !== "undefined" && "randomUUID" in crypto
-      ? crypto.randomUUID()
-      : `${Date.now()}_${Math.random().toString(16).slice(2)}`;
-
-  localStorage.setItem(key, created);
-  return created;
-}
-
-export default function GetRedeemQrButton({ dealId }: { dealId: string }) {
+export default function GetRedeemQrButton({ dealId }: Props) {
   const router = useRouter();
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
-  async function handleGetQr() {
+  const canClick = useMemo(() => !loading && !!dealId, [loading, dealId]);
+
+  async function startRedeem() {
+    if (!canClick) return;
+
     setErr(null);
     setLoading(true);
 
     try {
-      const deviceId = getOrCreateDeviceId();
-
       const res = await fetch("/api/redeem/start", {
         method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ dealId, deviceId }),
+        headers: { "Content-Type": "application/json" },
+        cache: "no-store",
+        body: JSON.stringify({ dealId }),
       });
 
-      const json = await res.json().catch(() => ({}));
+      const data = await res.json().catch(() => ({}));
 
-      if (!res.ok) {
-        throw new Error(json?.error || "Failed to generate QR");
+      if (!res.ok || !data?.shortCode) {
+        throw new Error(data?.error || "Could not generate QR. Try again.");
       }
 
-      const shortCode = String(json?.shortCode || "").trim();
-      if (!shortCode) throw new Error("Missing shortCode from server");
+      const shortCode = String(data.shortCode);
 
+      // ✅ send user straight to /r/[shortCode]
       router.push(`/r/${encodeURIComponent(shortCode)}`);
+      router.refresh();
     } catch (e: any) {
-      setErr(e?.message || "Something went wrong");
+      setErr(e?.message || "Something went wrong.");
     } finally {
       setLoading(false);
     }
   }
 
   return (
-    <div className="mt-4">
+    <div className="space-y-3">
       {err ? (
-        <div className="mb-3 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800">
+        <div className="rounded-2xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800">
           {err}
         </div>
       ) : null}
 
       <button
-        onClick={handleGetQr}
-        disabled={loading}
+        type="button"
+        onClick={startRedeem}
+        disabled={!canClick}
         className={[
-          "inline-flex items-center justify-center rounded-full px-5 py-2 text-sm font-semibold transition",
-          loading
-            ? "bg-slate-200 text-slate-500 cursor-not-allowed"
+          "w-full rounded-full px-4 py-2 text-sm font-semibold shadow-sm transition",
+          !canClick
+            ? "cursor-not-allowed bg-slate-200 text-slate-500"
             : "bg-emerald-600 text-white hover:bg-emerald-700",
         ].join(" ")}
       >
-        {loading ? "Generating QR…" : "Get QR code"}
+        {loading ? "Generating QR…" : "Get QR to redeem"}
       </button>
 
-      <p className="mt-2 text-xs text-slate-500">
-        QR is device-locked and expires in 15 minutes.
+      <p className="text-[11px] text-slate-500">
+        QR expires in 15 minutes. It’s locked to your device.
       </p>
     </div>
   );
