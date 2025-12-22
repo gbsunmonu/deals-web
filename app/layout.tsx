@@ -5,7 +5,7 @@ import Link from "next/link";
 import Image from "next/image";
 
 import { getServerSupabaseRSC } from "@/lib/supabase";
-import { prisma } from "@/lib/prisma";
+import prisma from "@/lib/prisma";
 
 import AuthSync from "@/components/AuthSync";
 import LogoutButton from "@/components/LogoutButton";
@@ -46,7 +46,6 @@ export default async function RootLayout({
   return (
     <html lang="en">
       <body className="bg-slate-50 text-slate-900">
-        {/* ✅ Client: keeps UI in sync after login/logout without refresh */}
         <AuthSync />
 
         <header className="border-b border-slate-200 bg-white">
@@ -100,6 +99,14 @@ export default async function RootLayout({
                     className="rounded-full px-3 py-1 font-semibold text-slate-700 hover:bg-slate-50"
                   >
                     Redeem QR
+                  </Link>
+
+                  {/* ✅ NEW */}
+                  <Link
+                    href="/merchant/analytics"
+                    className="rounded-full px-3 py-1 font-semibold text-slate-700 hover:bg-slate-50"
+                  >
+                    Analytics
                   </Link>
 
                   <Link

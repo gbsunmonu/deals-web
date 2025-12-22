@@ -1,5 +1,3 @@
-// prisma/schema.prisma
-
 datasource db {
   provider = "postgresql"
   url      = env("DATABASE_URL")
@@ -14,10 +12,14 @@ enum DiscountType {
   PERCENT
 }
 
+enum EventType {
+  DEAL_VIEW
+  MERCHANT_PROFILE_VIEW
+}
+
 model Merchant {
   id String @id @default(uuid()) @db.Uuid
 
-  // Link to Supabase auth user (nullable but unique)
   userId String? @unique @db.Uuid
 
   name        String
@@ -34,6 +36,9 @@ model Merchant {
   lng         Float?
 
   deals Deal[]
+
+  // 👇 needed for Prisma relations
+  events Event[]
 }
 
 model Deal {
@@ -42,16 +47,12 @@ model Deal {
   description String
 
   originalPrice Int?
-
-  // Optional: stable shortCode per deal (NOT the redemption shortCode)
-  shortCode String? @unique
+  shortCode     String? @unique
 
   discountValue Int          @default(0)
   discountType  DiscountType @default(NONE)
 
-  imageUrl String?
-
-  // total allowed redemptions (null/0 = unlimited)
+  imageUrl       String?
   maxRedemptions Int?
 
   startsAt DateTime
@@ -62,9 +63,11 @@ model Deal {
 
   redemptions Redemption[]
 
-  // REQUIRED: opposite relation fields for RedemptionBlockLog
   requestedBlockLogs RedemptionBlockLog[] @relation("RequestedDeal")
   blockedBlockLogs   RedemptionBlockLog[] @relation("BlockedDeal")
+
+  // 👇 needed for Prisma relations
+  events Event[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -76,23 +79,14 @@ model Redemption {
   dealId String @db.Uuid
   deal   Deal   @relation(fields: [dealId], references: [id])
 
-  // Required by your code + schema
   code      String @unique
   shortCode String @unique
 
   redeemedAt DateTime?
+  expiresAt  DateTime
 
-  // ✅ Required: QR expiry
-  expiresAt DateTime
-
-  // ✅ Device lock (we use a cookie-based stable device id)
   deviceHash String?
-
-  // ✅ Lagos day key like "2025-12-21" so user can do 1 per deal per day
-  dayKey String?
-
-  // Optional lock key (if you use it elsewhere)
-  activeKey String? @unique
+  activeKey  String? @unique
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -100,29 +94,24 @@ model Redemption {
   @@index([dealId])
   @@index([dealId, redeemedAt])
   @@index([expiresAt])
-
-  // ✅ Enforce: 1 QR per deal per device per day
-  @@unique([dealId, deviceHash, dayKey])
 }
 
 model RedemptionBlockLog {
   id String @id @default(uuid()) @db.Uuid
 
-  createdAt DateTime @default(now()) @map("created_at")
+  createdAt  DateTime @default(now()) @map("created_at")
+  deviceHash String   @map("device_hash")
 
-  deviceHash String @map("device_hash")
-
-  requestedDealId String @db.Uuid @map("requested_deal_id")
+  requestedDealId String @map("requested_deal_id") @db.Uuid
   requestedDeal   Deal   @relation("RequestedDeal", fields: [requestedDealId], references: [id], onDelete: Cascade)
 
-  blockedDealId String? @db.Uuid @map("blocked_deal_id")
+  blockedDealId String? @map("blocked_deal_id") @db.Uuid
   blockedDeal   Deal?   @relation("BlockedDeal", fields: [blockedDealId], references: [id], onDelete: SetNull)
 
   blockedShortCode String?   @map("blocked_short_code")
   blockedExpiresAt DateTime? @map("blocked_expires_at")
 
-  reason String
-
+  reason        String
   retryAfterSec Int?    @map("retry_after_sec")
   userAgent     String? @map("user_agent")
 
@@ -131,6 +120,29 @@ model RedemptionBlockLog {
   @@index([requestedDealId])
   @@index([blockedDealId])
   @@index([reason])
-
   @@map("RedemptionBlockLog")
+}
+
+model Event {
+  id String @id @default(uuid()) @db.Uuid
+
+  type       EventType
+  deviceHash String
+
+  // 👇 dedupe key: one view per device per day per target
+  dayKey String @db.VarChar(128)
+
+  merchantId String?   @db.Uuid
+  merchant   Merchant? @relation(fields: [merchantId], references: [id], onDelete: SetNull)
+
+  dealId String? @db.Uuid
+  deal   Deal?   @relation(fields: [dealId], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now())
+
+  @@unique([dayKey])
+  @@index([type, createdAt])
+  @@index([merchantId, createdAt])
+  @@index([dealId, createdAt])
+  @@map("Event")
 }
