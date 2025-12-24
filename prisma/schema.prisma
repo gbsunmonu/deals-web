@@ -1,6 +1,9 @@
+// prisma/schema.prisma
+
 datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
 }
 
 generator client {
@@ -20,6 +23,7 @@ enum EventType {
 model Merchant {
   id String @id @default(uuid()) @db.Uuid
 
+  // Link to Supabase auth user (nullable but unique)
   userId String? @unique @db.Uuid
 
   name        String
@@ -37,7 +41,7 @@ model Merchant {
 
   deals Deal[]
 
-  // 👇 needed for Prisma relations
+  // ✅ opposite relation for Event.merchant
   events Event[]
 }
 
@@ -47,12 +51,15 @@ model Deal {
   description String
 
   originalPrice Int?
-  shortCode     String? @unique
+
+  shortCode String? @unique
 
   discountValue Int          @default(0)
   discountType  DiscountType @default(NONE)
 
-  imageUrl       String?
+  imageUrl String?
+
+  // how many times the deal can be redeemed total (null/0 = unlimited)
   maxRedemptions Int?
 
   startsAt DateTime
@@ -66,7 +73,7 @@ model Deal {
   requestedBlockLogs RedemptionBlockLog[] @relation("RequestedDeal")
   blockedBlockLogs   RedemptionBlockLog[] @relation("BlockedDeal")
 
-  // 👇 needed for Prisma relations
+  // ✅ opposite relation for Event.deal
   events Event[]
 
   createdAt DateTime @default(now())
@@ -83,7 +90,9 @@ model Redemption {
   shortCode String @unique
 
   redeemedAt DateTime?
-  expiresAt  DateTime
+
+  // QR expiry (required)
+  expiresAt DateTime
 
   deviceHash String?
   activeKey  String? @unique
@@ -99,8 +108,9 @@ model Redemption {
 model RedemptionBlockLog {
   id String @id @default(uuid()) @db.Uuid
 
-  createdAt  DateTime @default(now()) @map("created_at")
-  deviceHash String   @map("device_hash")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  deviceHash String @map("device_hash")
 
   requestedDealId String @map("requested_deal_id") @db.Uuid
   requestedDeal   Deal   @relation("RequestedDeal", fields: [requestedDealId], references: [id], onDelete: Cascade)
@@ -111,7 +121,8 @@ model RedemptionBlockLog {
   blockedShortCode String?   @map("blocked_short_code")
   blockedExpiresAt DateTime? @map("blocked_expires_at")
 
-  reason        String
+  reason String
+
   retryAfterSec Int?    @map("retry_after_sec")
   userAgent     String? @map("user_agent")
 
@@ -126,11 +137,11 @@ model RedemptionBlockLog {
 model Event {
   id String @id @default(uuid()) @db.Uuid
 
-  type       EventType
+  type EventType
   deviceHash String
 
-  // 👇 dedupe key: one view per device per day per target
-  dayKey String @db.VarChar(128)
+  // ✅ used for dedupe: unique per device/day/target/type
+  dayKey String @unique @db.VarChar(128)
 
   merchantId String?   @db.Uuid
   merchant   Merchant? @relation(fields: [merchantId], references: [id], onDelete: SetNull)
@@ -140,9 +151,10 @@ model Event {
 
   createdAt DateTime @default(now())
 
-  @@unique([dayKey])
   @@index([type, createdAt])
+  @@index([deviceHash, createdAt])
   @@index([merchantId, createdAt])
   @@index([dealId, createdAt])
+  @@index([dayKey])
   @@map("Event")
 }

@@ -1,8 +1,7 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
-import DealCard from "@/components/DealCard"; // ✅ must point to components/DealCard.tsx
-import type { AvailabilityRow } from "@/components/AvailabilityBadge";
+import ExploreSearchBar from "./search-bar";
+import ExploreGridClient from "./ExploreGridClient";
 
 type DealRow = {
   id: string;
@@ -18,88 +17,23 @@ type DealRow = {
   merchant: { id: string; name: string; city: string | null };
 };
 
-type AvailabilityMap = Record<string, AvailabilityRow>;
-
 export default function ExploreClient({ deals }: { deals: DealRow[] }) {
-  const ids = useMemo(() => deals.map((d) => d.id), [deals]);
-
-  const [map, setMap] = useState<AvailabilityMap>({});
-  const [pulseKey, setPulseKey] = useState<Record<string, number>>({});
-
-  const prevRef = useRef<AvailabilityMap>({});
-  const timerRef = useRef<any>(null);
-
-  async function fetchAvailability() {
-    if (!ids.length) return;
-
-    const res = await fetch("/api/deals/availability", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ids }),
-      cache: "no-store",
-    });
-
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) return;
-
-    const nextMap = (data?.map || {}) as AvailabilityMap;
-
-    const prev = prevRef.current;
-    const nextPulse: Record<string, number> = { ...pulseKey };
-
-    for (const id of ids) {
-      const a = prev[id];
-      const b = nextMap[id];
-      if (!b) continue;
-
-      const changed =
-        !a ||
-        a.soldOut !== b.soldOut ||
-        (a.left ?? null) !== (b.left ?? null) ||
-        (a.redeemedCount ?? 0) !== (b.redeemedCount ?? 0);
-
-      if (changed) nextPulse[id] = (nextPulse[id] || 0) + 1;
-    }
-
-    prevRef.current = nextMap;
-    setPulseKey(nextPulse);
-    setMap(nextMap);
-  }
-
-  useEffect(() => {
-    fetchAvailability();
-    if (timerRef.current) clearInterval(timerRef.current);
-    timerRef.current = setInterval(fetchAvailability, 5000);
-    return () => {
-      if (timerRef.current) clearInterval(timerRef.current);
-      timerRef.current = null;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ids.join(",")]);
-
   return (
-    <section aria-label="Live deals">
-      {deals.length === 0 ? (
-        <div className="rounded-2xl border border-dashed border-slate-200 bg-slate-50 px-4 py-10 text-center text-sm text-slate-500">
-          No deals match your search yet. Try clearing filters or checking back later.
-        </div>
-      ) : (
-        <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-          {deals.map((deal) => {
-            const availability = map[deal.id];
+    <main className="mx-auto max-w-6xl px-4 py-8">
+      <header className="mb-5">
+        <h1 className="text-2xl font-semibold tracking-tight text-slate-900">
+          Explore deals
+        </h1>
+        <p className="mt-1 text-sm text-slate-600">
+          Find live local discounts and redeem with a QR.
+        </p>
 
-            return (
-              <DealCard
-                key={deal.id}
-                deal={deal}
-                merchant={deal.merchant}
-                availability={availability}
-                availabilityPulseKey={pulseKey[deal.id] || 0}
-              />
-            );
-          })}
+        <div className="mt-4">
+          <ExploreSearchBar />
         </div>
-      )}
-    </section>
+      </header>
+
+      <ExploreGridClient deals={deals} />
+    </main>
   );
 }

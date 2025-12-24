@@ -1,4 +1,5 @@
-import { prisma } from "@/lib/prisma";
+// app/merchant/analytics/page.tsx
+import prisma from "@/lib/prisma";
 import { getServerSupabaseRSC } from "@/lib/supabase";
 import { redirect } from "next/navigation";
 import Link from "next/link";
@@ -10,22 +11,27 @@ function formatNaira(value: number | null) {
   return `₦${value.toLocaleString("en-NG")}`;
 }
 
-function clampPct(n: number) {
+function pct(n: number) {
   if (!Number.isFinite(n)) return 0;
   return Math.max(0, Math.min(100, Math.round(n)));
 }
 
-function discountedPrice(originalPrice: number | null, discountValue: number, discountType: string) {
+function computeDiscountedPrice(originalPrice: number | null, discountValue: number, discountType: string) {
   if (!originalPrice || originalPrice <= 0) return originalPrice;
-  const pct = clampPct(Number(discountValue ?? 0));
-  if (discountType !== "PERCENT" || pct <= 0) return originalPrice;
-  return Math.max(0, Math.round(originalPrice - (originalPrice * pct) / 100));
+  const p = pct(Number(discountValue ?? 0));
+  if (discountType !== "PERCENT" || p <= 0) return originalPrice;
+  return Math.max(0, Math.round(originalPrice - (originalPrice * p) / 100));
+}
+
+function safeRate(num: number, den: number) {
+  if (!den) return 0;
+  return Math.round((num / den) * 100);
 }
 
 export default async function MerchantAnalyticsPage() {
   const supabase = await getServerSupabaseRSC();
   const { data: { user } } = await supabase.auth.getUser();
-  if (!user) redirect("/login");
+  if (!user) redirect("/login?returnTo=/merchant/analytics");
 
   const merchant = await prisma.merchant.findUnique({
     where: { userId: user.id as any },
@@ -37,7 +43,6 @@ export default async function MerchantAnalyticsPage() {
 
   const todayStart = new Date(now);
   todayStart.setHours(0, 0, 0, 0);
-
   const todayEnd = new Date(now);
   todayEnd.setHours(23, 59, 59, 999);
 
@@ -45,155 +50,146 @@ export default async function MerchantAnalyticsPage() {
   weekStart.setDate(weekStart.getDate() - 6);
   weekStart.setHours(0, 0, 0, 0);
 
-  // KPI: deals + redemptions
-  const [liveDeals, totalDeals, redeemedToday, redeemed7d] = await Promise.all([
+  // KPIs
+  const [
+    liveDeals,
+    totalDeals,
+
+    // views
+    profileViews7d,
+    profileViewsToday,
+    dealViews7d,
+    dealViewsToday,
+
+    // funnel
+    qrGenerated7d,
+    qrGeneratedToday,
+    redeemed7d,
+    redeemedToday,
+  ] = await Promise.all([
     prisma.deal.count({
-      where: {
-        merchantId: merchant.id,
-        startsAt: { lte: now },
-        endsAt: { gte: now },
-      },
+      where: { merchantId: merchant.id, startsAt: { lte: now }, endsAt: { gte: now } },
     }),
     prisma.deal.count({ where: { merchantId: merchant.id } }),
+
+    prisma.event.count({
+      where: { type: "MERCHANT_PROFILE_VIEW", merchantId: merchant.id, createdAt: { gte: weekStart, lte: todayEnd } },
+    }),
+    prisma.event.count({
+      where: { type: "MERCHANT_PROFILE_VIEW", merchantId: merchant.id, createdAt: { gte: todayStart, lte: todayEnd } },
+    }),
+    prisma.event.count({
+      where: { type: "DEAL_VIEW", merchantId: merchant.id, createdAt: { gte: weekStart, lte: todayEnd } },
+    }),
+    prisma.event.count({
+      where: { type: "DEAL_VIEW", merchantId: merchant.id, createdAt: { gte: todayStart, lte: todayEnd } },
+    }),
+
+    // QR generated = redemption rows created
     prisma.redemption.count({
-      where: {
-        redeemedAt: { gte: todayStart, lte: todayEnd },
-        deal: { merchantId: merchant.id },
-      },
+      where: { createdAt: { gte: weekStart, lte: todayEnd }, deal: { merchantId: merchant.id } },
     }),
     prisma.redemption.count({
-      where: {
-        redeemedAt: { gte: weekStart, lte: todayEnd },
-        deal: { merchantId: merchant.id },
-      },
+      where: { createdAt: { gte: todayStart, lte: todayEnd }, deal: { merchantId: merchant.id } },
+    }),
+
+    prisma.redemption.count({
+      where: { redeemedAt: { gte: weekStart, lte: todayEnd }, deal: { merchantId: merchant.id } },
+    }),
+    prisma.redemption.count({
+      where: { redeemedAt: { gte: todayStart, lte: todayEnd }, deal: { merchantId: merchant.id } },
     }),
   ]);
 
-  // KPI: views
-  const [dealViewsToday, dealViews7d, profileViewsToday, profileViews7d] = await Promise.all([
-    prisma.event.count({
-      where: {
-        type: "DEAL_VIEW",
-        merchantId: merchant.id,
-        createdAt: { gte: todayStart, lte: todayEnd },
-      },
-    }),
-    prisma.event.count({
-      where: {
-        type: "DEAL_VIEW",
-        merchantId: merchant.id,
-        createdAt: { gte: weekStart, lte: todayEnd },
-      },
-    }),
-    prisma.event.count({
-      where: {
-        type: "MERCHANT_PROFILE_VIEW",
-        merchantId: merchant.id,
-        createdAt: { gte: todayStart, lte: todayEnd },
-      },
-    }),
-    prisma.event.count({
-      where: {
-        type: "MERCHANT_PROFILE_VIEW",
-        merchantId: merchant.id,
-        createdAt: { gte: weekStart, lte: todayEnd },
-      },
-    }),
-  ]);
+  // Funnel views (7d) = DEAL_VIEW only
+  const views7d = dealViews7d;
+  const viewsToday = dealViewsToday;
 
-  // Top redeemed deals (7d)
-  const topRedeemed = await prisma.redemption.groupBy({
-    by: ["dealId"],
-    where: {
-      redeemedAt: { gte: weekStart, lte: todayEnd },
-      deal: { merchantId: merchant.id },
+  // Best converting deals (7d)
+  const deals = await prisma.deal.findMany({
+    where: { merchantId: merchant.id },
+    select: {
+      id: true,
+      title: true,
+      discountType: true,
+      discountValue: true,
+      originalPrice: true,
     },
-    _count: { dealId: true },
-    orderBy: { _count: { dealId: "desc" } },
-    take: 8,
   });
 
-  // Top viewed deals (7d)
-  const topViewed = await prisma.event.groupBy({
-    by: ["dealId"],
-    where: {
-      type: "DEAL_VIEW",
-      merchantId: merchant.id,
-      createdAt: { gte: weekStart, lte: todayEnd },
-      dealId: { not: null },
-    },
-    _count: { dealId: true },
-    orderBy: { _count: { dealId: "desc" } },
-    take: 8,
-  });
-
-  const topDealIds = Array.from(
-    new Set([
-      ...topRedeemed.map((r) => r.dealId),
-      ...topViewed.map((r) => r.dealId as string),
-    ])
-  );
-
-  const deals =
-    topDealIds.length === 0
-      ? []
-      : await prisma.deal.findMany({
-          where: { id: { in: topDealIds } },
-          select: {
-            id: true,
-            title: true,
-            discountType: true,
-            discountValue: true,
-            originalPrice: true,
-            endsAt: true,
-          },
-        });
-
+  const dealIds = deals.map((d) => d.id);
   const dealMap = new Map(deals.map((d) => [d.id, d]));
-  const viewsMap = new Map(topViewed.map((v) => [String(v.dealId), v._count.dealId]));
-  const redMap = new Map(topRedeemed.map((r) => [r.dealId, r._count.dealId]));
 
-  const topRows = topDealIds
+  const [viewsByDeal, qrByDeal, redeemedByDeal] = await Promise.all([
+    prisma.event.groupBy({
+      by: ["dealId"],
+      where: {
+        type: "DEAL_VIEW",
+        merchantId: merchant.id,
+        dealId: { in: dealIds },
+        createdAt: { gte: weekStart, lte: todayEnd },
+      },
+      _count: { _all: true },
+    }),
+    prisma.redemption.groupBy({
+      by: ["dealId"],
+      where: { dealId: { in: dealIds }, createdAt: { gte: weekStart, lte: todayEnd } },
+      _count: { _all: true },
+    }),
+    prisma.redemption.groupBy({
+      by: ["dealId"],
+      where: { dealId: { in: dealIds }, redeemedAt: { gte: weekStart, lte: todayEnd } },
+      _count: { _all: true },
+    }),
+  ]);
+
+  const vMap = new Map<string, number>();
+  for (const r of viewsByDeal) if (r.dealId) vMap.set(r.dealId, r._count._all);
+
+  const qMap = new Map<string, number>();
+  for (const r of qrByDeal) qMap.set(r.dealId, r._count._all);
+
+  const rMap = new Map<string, number>();
+  for (const r of redeemedByDeal) rMap.set(r.dealId, r._count._all);
+
+  const rows = dealIds
     .map((id) => {
       const d = dealMap.get(id);
       if (!d) return null;
+      const views = vMap.get(id) || 0;
+      const qr = qMap.get(id) || 0;
+      const redeemed = rMap.get(id) || 0;
 
-      const views = viewsMap.get(id) ?? 0;
-      const redemptions = redMap.get(id) ?? 0;
-
-      const disc = discountedPrice(
+      const discounted = computeDiscountedPrice(
         d.originalPrice ?? null,
         Number(d.discountValue ?? 0),
         String(d.discountType)
       );
 
-      const conversion = views > 0 ? Math.round((redemptions / views) * 100) : 0;
-
       return {
         id,
         title: d.title,
         views,
-        redemptions,
-        conversion,
+        qr,
+        redeemed,
+        qrPerView: safeRate(qr, views),
+        redeemPerView: safeRate(redeemed, views),
+        redeemPerQr: safeRate(redeemed, qr),
+        discountedPrice: discounted,
         originalPrice: d.originalPrice ?? null,
-        discountedPrice: disc ?? null,
         discountType: String(d.discountType),
         discountValue: Number(d.discountValue ?? 0),
-        endsAt: d.endsAt,
       };
     })
-    .filter(Boolean) as Array<{
-      id: string;
-      title: string;
-      views: number;
-      redemptions: number;
-      conversion: number;
-      originalPrice: number | null;
-      discountedPrice: number | null;
-      discountType: string;
-      discountValue: number;
-      endsAt: Date;
-    }>;
+    .filter(Boolean) as any[];
+
+  rows.sort((a, b) => {
+    // best converting: Redeem/View desc, then Views desc
+    if (b.redeemPerView !== a.redeemPerView) return b.redeemPerView - a.redeemPerView;
+    return b.views - a.views;
+  });
+
+  const topRows = rows.slice(0, 12);
 
   return (
     <main className="mx-auto max-w-6xl px-4 py-10">
@@ -206,7 +202,7 @@ export default async function MerchantAnalyticsPage() {
             Analytics
           </h1>
           <p className="mt-2 text-sm text-slate-600">
-            Performance overview for <span className="font-semibold">{merchant.name}</span>.
+            Funnel + performance for <span className="font-semibold">{merchant.name}</span>.
           </p>
         </div>
 
@@ -233,7 +229,7 @@ export default async function MerchantAnalyticsPage() {
             Live deals
           </p>
           <p className="mt-2 text-3xl font-semibold text-slate-900">{liveDeals}</p>
-          <p className="mt-1 text-xs text-slate-500">Currently active right now.</p>
+          <p className="mt-1 text-xs text-slate-500">Active right now.</p>
         </div>
 
         <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
@@ -241,77 +237,78 @@ export default async function MerchantAnalyticsPage() {
             Total deals
           </p>
           <p className="mt-2 text-3xl font-semibold text-slate-900">{totalDeals}</p>
-          <p className="mt-1 text-xs text-slate-500">All deals created.</p>
+          <p className="mt-1 text-xs text-slate-500">All time.</p>
         </div>
 
         <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
           <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
-            Redeemed today
-          </p>
-          <p className="mt-2 text-3xl font-semibold text-slate-900">{redeemedToday}</p>
-          <p className="mt-1 text-xs text-slate-500">Since midnight.</p>
-        </div>
-
-        <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
-          <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
-            Redeemed last 7 days
-          </p>
-          <p className="mt-2 text-3xl font-semibold text-slate-900">{redeemed7d}</p>
-          <p className="mt-1 text-xs text-slate-500">Rolling 7-day total.</p>
-        </div>
-      </section>
-
-      {/* Views KPI */}
-      <section className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-        <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
-          <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
-            Deal views today
-          </p>
-          <p className="mt-2 text-3xl font-semibold text-slate-900">{dealViewsToday}</p>
-          <p className="mt-1 text-xs text-slate-500">Unique device views.</p>
-        </div>
-
-        <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
-          <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
-            Deal views 7 days
-          </p>
-          <p className="mt-2 text-3xl font-semibold text-slate-900">{dealViews7d}</p>
-          <p className="mt-1 text-xs text-slate-500">Unique device views.</p>
-        </div>
-
-        <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
-          <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
-            Profile views today
-          </p>
-          <p className="mt-2 text-3xl font-semibold text-slate-900">{profileViewsToday}</p>
-          <p className="mt-1 text-xs text-slate-500">Merchant page visits.</p>
-        </div>
-
-        <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
-          <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
-            Profile views 7 days
+            Profile views (7d)
           </p>
           <p className="mt-2 text-3xl font-semibold text-slate-900">{profileViews7d}</p>
-          <p className="mt-1 text-xs text-slate-500">Merchant page visits.</p>
+          <p className="mt-1 text-xs text-slate-500">Today: {profileViewsToday}</p>
+        </div>
+
+        <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
+          <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+            Deal views (7d)
+          </p>
+          <p className="mt-2 text-3xl font-semibold text-slate-900">{dealViews7d}</p>
+          <p className="mt-1 text-xs text-slate-500">Today: {dealViewsToday}</p>
         </div>
       </section>
 
-      {/* Top Deals table */}
+      {/* Funnel */}
       <section className="mt-6 rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
         <div className="flex items-start justify-between gap-3">
           <div>
-            <h2 className="text-sm font-semibold text-slate-900">
-              Top deals (views + redemptions, 7 days)
-            </h2>
+            <h2 className="text-sm font-semibold text-slate-900">Funnel totals (last 7 days)</h2>
             <p className="mt-1 text-xs text-slate-500">
-              Conversion = redemptions ÷ views.
+              Views are deduped by device/day. QR = redemption rows created.
             </p>
+          </div>
+
+          <div className="text-right text-xs text-slate-500">
+            Today: <span className="font-semibold text-slate-700">{viewsToday}</span> views •{" "}
+            <span className="font-semibold text-slate-700">{qrGeneratedToday}</span> QR •{" "}
+            <span className="font-semibold text-slate-700">{redeemedToday}</span> redeemed
           </div>
         </div>
 
+        <div className="mt-4 grid gap-3 md:grid-cols-3">
+          <div className="rounded-3xl bg-slate-50 p-5">
+            <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Views</p>
+            <p className="mt-2 text-3xl font-semibold text-slate-900">{views7d}</p>
+          </div>
+
+          <div className="rounded-3xl bg-slate-50 p-5">
+            <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">QR generated</p>
+            <p className="mt-2 text-3xl font-semibold text-slate-900">{qrGenerated7d}</p>
+            <p className="mt-1 text-xs text-slate-500">
+              QR/View: <span className="font-semibold text-slate-700">{safeRate(qrGenerated7d, views7d)}%</span>
+            </p>
+          </div>
+
+          <div className="rounded-3xl bg-slate-50 p-5">
+            <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Redeemed</p>
+            <p className="mt-2 text-3xl font-semibold text-slate-900">{redeemed7d}</p>
+            <p className="mt-1 text-xs text-slate-500">
+              Redeem/View: <span className="font-semibold text-slate-700">{safeRate(redeemed7d, views7d)}%</span>{" "}
+              • Redeem/QR: <span className="font-semibold text-slate-700">{safeRate(redeemed7d, qrGenerated7d)}%</span>
+            </p>
+          </div>
+        </div>
+      </section>
+
+      {/* Best converting deals */}
+      <section className="mt-6 rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
+        <h2 className="text-sm font-semibold text-slate-900">Best converting deals (7d)</h2>
+        <p className="mt-1 text-xs text-slate-500">
+          Sorted by Redeem/View (then Views). This is the “real conversion” metric.
+        </p>
+
         {topRows.length === 0 ? (
           <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 px-3 py-3 text-sm text-slate-600">
-            Not enough data yet. Once customers view deals and redeem, this will populate.
+            No data yet.
           </div>
         ) : (
           <div className="mt-4 overflow-x-auto">
@@ -320,10 +317,12 @@ export default async function MerchantAnalyticsPage() {
                 <tr className="border-b">
                   <th className="py-2 pr-3">Deal</th>
                   <th className="py-2 pr-3">Views</th>
-                  <th className="py-2 pr-3">Redemptions</th>
-                  <th className="py-2 pr-3">Conversion</th>
+                  <th className="py-2 pr-3">QR</th>
+                  <th className="py-2 pr-3">Redeemed</th>
+                  <th className="py-2 pr-3">QR/View</th>
+                  <th className="py-2 pr-3">Redeem/View</th>
+                  <th className="py-2 pr-3">Redeem/QR</th>
                   <th className="py-2 pr-3">Price</th>
-                  <th className="py-2 pr-3">Ends</th>
                 </tr>
               </thead>
               <tbody>
@@ -333,10 +332,13 @@ export default async function MerchantAnalyticsPage() {
                       <div className="font-medium text-slate-900">{r.title}</div>
                       <div className="text-[11px] text-slate-500">ID: {r.id}</div>
                     </td>
-                    <td className="py-2 pr-3 text-slate-700">{r.views}</td>
-                    <td className="py-2 pr-3 text-slate-700">{r.redemptions}</td>
-                    <td className="py-2 pr-3 text-slate-700">{r.conversion}%</td>
-                    <td className="py-2 pr-3 text-slate-700 whitespace-nowrap">
+                    <td className="py-2 pr-3">{r.views}</td>
+                    <td className="py-2 pr-3">{r.qr}</td>
+                    <td className="py-2 pr-3">{r.redeemed}</td>
+                    <td className="py-2 pr-3">{r.qrPerView}%</td>
+                    <td className="py-2 pr-3 font-semibold text-emerald-700">{r.redeemPerView}%</td>
+                    <td className="py-2 pr-3">{r.redeemPerQr}%</td>
+                    <td className="py-2 pr-3 whitespace-nowrap">
                       {r.discountType === "PERCENT" && r.discountValue > 0 ? (
                         <>
                           <span className="font-semibold text-emerald-700">
@@ -349,9 +351,6 @@ export default async function MerchantAnalyticsPage() {
                       ) : (
                         <span>{formatNaira(r.originalPrice)}</span>
                       )}
-                    </td>
-                    <td className="py-2 pr-3 text-slate-700 whitespace-nowrap">
-                      {new Date(r.endsAt).toLocaleString()}
                     </td>
                   </tr>
                 ))}

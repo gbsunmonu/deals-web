@@ -1,31 +1,60 @@
+// app/actions/createDeal.ts
 "use server";
 
-import prisma from "@/lib/prisma";
+import { prisma } from "@/lib/prisma";
+import { getServerSupabaseRSC } from "@/lib/supabase";
+import { redirect } from "next/navigation";
 
-function makeShortCode() {
-  return Math.random().toString(36).substring(2, 8).toUpperCase();
-}
+type CreateDealInput = {
+  title: string;
+  description: string;
+  originalPrice?: number | null;
+  discountType?: "NONE" | "PERCENT";
+  discountValue?: number;
+  imageUrl?: string | null;
+  maxRedemptions?: number | null;
+  startsAt: string; // ISO string
+  endsAt: string; // ISO string
+};
 
-export async function createDeal(data: any) {
-  let shortCode = makeShortCode();
+export async function createDeal(input: CreateDealInput) {
+  const supabase = await getServerSupabaseRSC();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
 
-  // Try 3 times to avoid collisions
-  for (let i = 0; i < 3; i++) {
-    const exists = await prisma.deal.findFirst({
-      where: { shortCode },
-      select: { id: true },
-    });
+  if (!user) redirect("/login?returnTo=/merchant/profile");
 
-    if (!exists) break;
-    shortCode = makeShortCode();
-  }
-
-  const deal = await prisma.deal.create({
-    data: {
-      ...data,
-      shortCode,
-    },
+  const merchant = await prisma.merchant.findUnique({
+    where: { userId: user.id as any },
+    select: { id: true },
   });
 
-  return deal;
+  if (!merchant) redirect("/merchant/profile");
+
+  const startsAt = new Date(input.startsAt);
+  const endsAt = new Date(input.endsAt);
+
+  const discountType = (input.discountType ?? "NONE") as any;
+  const discountValue = Number(input.discountValue ?? 0);
+
+  const created = await prisma.deal.create({
+    data: {
+      merchantId: merchant.id,
+      title: String(input.title || "").trim(),
+      description: String(input.description || "").trim(),
+      originalPrice:
+        input.originalPrice == null ? null : Math.max(0, Math.round(input.originalPrice)),
+      discountType,
+      discountValue: Math.max(0, Math.round(discountValue)),
+      imageUrl: input.imageUrl ?? null,
+      maxRedemptions:
+        input.maxRedemptions == null ? null : Math.max(0, Math.round(input.maxRedemptions)),
+      startsAt,
+      endsAt,
+    },
+    select: { id: true },
+  });
+
+  return { ok: true, id: created.id };
 }

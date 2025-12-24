@@ -5,7 +5,7 @@ import Link from "next/link";
 import Image from "next/image";
 
 import { getServerSupabaseRSC } from "@/lib/supabase";
-import prisma from "@/lib/prisma";
+import { prisma } from "@/lib/prisma";
 
 import AuthSync from "@/components/AuthSync";
 import LogoutButton from "@/components/LogoutButton";
@@ -66,7 +66,9 @@ export default async function RootLayout({
                 <span className="text-sm font-semibold tracking-tight">
                   Yes to Deals
                 </span>
-                <span className="text-[10px] text-slate-400">Save more locally</span>
+                <span className="text-[10px] text-slate-400">
+                  Save more locally
+                </span>
               </div>
             </Link>
 
@@ -87,6 +89,14 @@ export default async function RootLayout({
                     Merchant home
                   </Link>
 
+                  {/* ✅ RESTORED */}
+                  <Link
+                    href="/merchant/analytics"
+                    className="rounded-full px-3 py-1 font-semibold text-slate-700 hover:bg-slate-50"
+                  >
+                    Analytics
+                  </Link>
+
                   <Link
                     href="/merchant/profile/edit"
                     className="rounded-full px-3 py-1 font-semibold text-slate-700 hover:bg-slate-50"
@@ -99,14 +109,6 @@ export default async function RootLayout({
                     className="rounded-full px-3 py-1 font-semibold text-slate-700 hover:bg-slate-50"
                   >
                     Redeem QR
-                  </Link>
-
-                  {/* ✅ NEW */}
-                  <Link
-                    href="/merchant/analytics"
-                    className="rounded-full px-3 py-1 font-semibold text-slate-700 hover:bg-slate-50"
-                  >
-                    Analytics
                   </Link>
 
                   <Link

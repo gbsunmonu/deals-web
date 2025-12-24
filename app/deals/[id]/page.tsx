@@ -1,3 +1,4 @@
+// app/deals/[id]/page.tsx
 import { notFound } from "next/navigation";
 import Link from "next/link";
 import prisma from "@/lib/prisma";
@@ -75,7 +76,7 @@ export default async function DealDetailPage({ params }: DealDetailPageProps) {
 
   return (
     <main className="mx-auto max-w-6xl px-4 py-4">
-      {/* ✅ Track Deal View (deduped per day server-side) */}
+      {/* ✅ Track deal view (deduped by device/day) */}
       <ViewTracker type="DEAL_VIEW" dealId={deal.id} merchantId={deal.merchant.id} />
 
       {/* Breadcrumbs */}
@@ -285,11 +286,12 @@ export default async function DealDetailPage({ params }: DealDetailPageProps) {
                 Open in Google Maps
               </a>
 
+              {/* ✅ NEW: merchant page */}
               <Link
                 href={`/m/${deal.merchant.id}`}
                 className="inline-flex items-center rounded-full border border-slate-200 px-3 py-1.5 font-semibold text-slate-700 hover:bg-slate-50"
               >
-                View merchant profile
+                View merchant deals
               </Link>
 
               <Link

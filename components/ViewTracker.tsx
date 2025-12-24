@@ -1,25 +1,12 @@
+// components/ViewTracker.tsx
 "use client";
 
 import { useEffect, useRef } from "react";
 
-type DealViewProps = {
-  type: "DEAL_VIEW";
-  dealId: string;
-  merchantId: string;
-};
+type Props =
+  | { type: "DEAL_VIEW"; dealId: string; merchantId?: string }
+  | { type: "MERCHANT_PROFILE_VIEW"; merchantId: string; dealId?: string };
 
-type MerchantProfileViewProps = {
-  type: "MERCHANT_PROFILE_VIEW";
-  merchantId: string;
-  dealId?: never;
-};
-
-type Props = DealViewProps | MerchantProfileViewProps;
-
-/**
- * Fires ONE view event per mount (the server dedupes by dayKey anyway).
- * Runs client-side so it captures the customer device cookie.
- */
 export default function ViewTracker(props: Props) {
   const firedRef = useRef(false);
 
@@ -27,21 +14,16 @@ export default function ViewTracker(props: Props) {
     if (firedRef.current) return;
     firedRef.current = true;
 
-    const payload: any = {
-      type: props.type,
-      merchantId: props.merchantId,
-      dealId: props.type === "DEAL_VIEW" ? props.dealId : null,
-    };
-
     fetch("/api/view", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       cache: "no-store",
-      body: JSON.stringify(payload),
+      body: JSON.stringify(props),
     }).catch(() => {
-      // ignore view errors (never block UX)
+      // ignore analytics failure
     });
-  }, [props]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   return null;
 }
