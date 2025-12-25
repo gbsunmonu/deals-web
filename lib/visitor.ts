@@ -1,46 +1,50 @@
+// lib/visitor.ts
 import { cookies, headers } from "next/headers";
+import { randomUUID } from "crypto";
 
-const VISITOR_COOKIE = "ytd_vid";
+export const VISITOR_COOKIE = "ytd_vid";
 
 function isUuid(v: string) {
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v);
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+    v
+  );
 }
 
 /**
- * Read visitorId in Server Components / RSC
- * Middleware should always set it, but we hard-fallback to avoid crashes.
+ * RSC-safe visitor id:
+ * - reads cookie if present
+ * - else generates a UUID (and returns it; cookie must be set in a Route Handler / Middleware / Server Action response)
  */
 export async function getVisitorIdRSC(): Promise<string> {
-  const vid = cookies().get(VISITOR_COOKIE)?.value || "";
+  // ✅ Next 16: cookies() can be async → await it
+  const cookieStore = await cookies();
+  const vid = cookieStore.get(VISITOR_COOKIE)?.value || "";
   if (vid && isUuid(vid)) return vid;
 
-  // fallback: create a deterministic-ish id from headers (rare)
-  // NOTE: best effort only; middleware should prevent this path.
-  const h = headers();
-  const ua = h.get("user-agent") || "ua";
-  const seed = `${Date.now()}-${ua}-${Math.random()}`;
-  // not a uuid, but avoids null; you can also throw instead if you prefer strictness
-  return cryptoRandomUuidFallback(seed);
+  // fallback: deterministic-ish id from headers (rare)
+  const h = await headers();
+  const ua = h.get("user-agent") || "";
+  const accept = h.get("accept-language") || "";
+  const seed = `${ua}|${accept}`;
+
+  // If you prefer true random always:
+  // return randomUUID();
+
+  // Cheap stable-ish UUID from seed
+  // (not cryptographically strong, but fine as fallback)
+  const hash = await stableHash(seed);
+  const fake = `${hash.slice(0, 8)}-${hash.slice(8, 12)}-4${hash.slice(
+    13,
+    16
+  )}-a${hash.slice(17, 20)}-${hash.slice(20, 32)}`;
+
+  return isUuid(fake) ? fake : randomUUID();
 }
 
-/**
- * Read visitorId inside Route Handlers (req: NextRequest)
- */
-export function getVisitorIdFromRequest(req: Request): string | null {
-  const cookie = req.headers.get("cookie") || "";
-  const match = cookie.match(/(?:^|;\s*)ytd_vid=([^;]+)/);
-  const vid = match ? decodeURIComponent(match[1]) : "";
-  if (vid && isUuid(vid)) return vid;
-  return null;
-}
-
-function cryptoRandomUuidFallback(_seed: string) {
-  // If crypto.randomUUID exists in Node runtime:
-  // @ts-ignore
-  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
-    // @ts-ignore
-    return crypto.randomUUID();
-  }
-  // last resort
-  return "00000000-0000-4000-8000-000000000000";
+async function stableHash(s: string) {
+  // WebCrypto available in Node 18+ (Next runtime)
+  const enc = new TextEncoder().encode(s);
+  const buf = await crypto.subtle.digest("SHA-256", enc);
+  const arr = Array.from(new Uint8Array(buf));
+  return arr.map((b) => b.toString(16).padStart(2, "0")).join("");
 }
