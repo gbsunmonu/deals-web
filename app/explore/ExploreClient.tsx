@@ -36,11 +36,9 @@ export default function ExploreClient({
   bannerStats?: Partial<BannerStats> | null;
 }) {
   const sp = useSearchParams();
-  const sort = (sp.get("sort") || "").toLowerCase();
 
   const safeDeals = Array.isArray(deals) ? deals : [];
 
-  // ✅ default banner stats so it never crashes
   const safeBanner = useMemo(
     () => ({
       activeDeals: Number(bannerStats?.activeDeals ?? safeDeals.length) || 0,
@@ -49,7 +47,6 @@ export default function ExploreClient({
     [bannerStats?.activeDeals, bannerStats?.highestDiscountPct, safeDeals.length]
   );
 
-  // ✅ Search (client-side)
   const [q, setQ] = useState("");
 
   const filteredDeals = useMemo(() => {
@@ -64,9 +61,15 @@ export default function ExploreClient({
     });
   }, [q, safeDeals]);
 
-  // ✅ If nearby mode is empty, show auto-suggest expand radius
-  const showNearbyEmptySuggestion =
-    sort === "nearby" && q.trim().length === 0 && filteredDeals.length === 0;
+  // ✅ only show Nearby empty message when:
+  // - sort=nearby
+  // - has lat/lng in URL (NearbyButton puts them)
+  // - has r radius
+  // - results are empty (after filtering)
+  const sort = (sp.get("sort") || "").toLowerCase();
+  const hasCoords = !!sp.get("lat") && !!sp.get("lng");
+  const hasRadius = !!sp.get("r");
+  const showNearbyEmpty = sort === "nearby" && hasCoords && hasRadius && filteredDeals.length === 0;
 
   return (
     <main className="mx-auto max-w-6xl px-4 py-8">
@@ -94,8 +97,8 @@ export default function ExploreClient({
         ) : null}
       </div>
 
-      {/* ✅ Nearby empty-state suggestion (only when search is empty) */}
-      {showNearbyEmptySuggestion ? <NearbyEmptyState /> : null}
+      {/* ✅ Nearby empty-state w/ "Expand radius (count)" chips */}
+      {showNearbyEmpty ? <NearbyEmptyState /> : null}
 
       <ExploreGridClient deals={filteredDeals} />
     </main>

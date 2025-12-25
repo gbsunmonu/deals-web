@@ -1,27 +1,34 @@
-// app/explore/ExploreBanner.tsx
 "use client";
 
 import Link from "next/link";
-import { useSearchParams } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import NearbyButton from "./NearbyButton";
-import RadiusChips from "./RadiusChips";
 
 type Props = {
   activeDeals?: number;
   highestDiscountPct?: number;
 };
 
+const RADII = ["2", "5", "10"] as const;
+
 export default function ExploreBanner({
   activeDeals = 0,
   highestDiscountPct = 0,
 }: Props) {
-  const sp = useSearchParams();
-  const sort = sp.get("sort") || "";
-
   const safeActive = Number.isFinite(activeDeals) ? activeDeals : 0;
   const safePct = Number.isFinite(highestDiscountPct) ? highestDiscountPct : 0;
 
-  const isNearby = sort === "nearby";
+  const router = useRouter();
+  const sp = useSearchParams();
+
+  const sort = (sp.get("sort") || "").toLowerCase();
+  const r = sp.get("r") || "5";
+
+  function setRadius(nextR: string) {
+    const qs = new URLSearchParams(sp.toString());
+    qs.set("r", nextR);
+    router.push(`/explore?${qs.toString()}`);
+  }
 
   return (
     <section className="mb-6 overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-sm">
@@ -68,19 +75,42 @@ export default function ExploreBanner({
         </div>
 
         <div className="flex flex-col gap-2 sm:items-end">
+          {/* Toggle chips */}
           <div className="flex flex-wrap gap-2 sm:justify-end">
             <Link
               href="/explore?sort=hot"
-              className="rounded-full bg-white px-4 py-2 text-sm font-semibold text-slate-900 shadow-sm ring-1 ring-slate-200 hover:bg-slate-50"
+              className={[
+                "rounded-full px-4 py-2 text-sm font-semibold shadow-sm ring-1 ring-slate-200 transition",
+                sort === "hot" ? "bg-slate-900 text-white" : "bg-white text-slate-900 hover:bg-slate-50",
+              ].join(" ")}
             >
-              🔥 Hot deals
+              🔥 Hot
             </Link>
 
             <NearbyButton />
           </div>
 
-          {/* ✅ Radius chips only show when sort=nearby */}
-          {isNearby ? <RadiusChips /> : null}
+          {/* Radius chips (only when Nearby is active) */}
+          {sort === "nearby" ? (
+            <div className="flex flex-wrap items-center gap-2 sm:justify-end">
+              <span className="text-xs font-semibold text-slate-500">Radius:</span>
+              {RADII.map((x) => (
+                <button
+                  key={x}
+                  type="button"
+                  onClick={() => setRadius(x)}
+                  className={[
+                    "rounded-full px-3 py-1.5 text-xs font-semibold ring-1 transition",
+                    r === x
+                      ? "bg-emerald-600 text-white ring-emerald-600"
+                      : "bg-white text-slate-700 ring-slate-200 hover:bg-slate-50",
+                  ].join(" ")}
+                >
+                  {x} km
+                </button>
+              ))}
+            </div>
+          ) : null}
         </div>
       </div>
     </section>

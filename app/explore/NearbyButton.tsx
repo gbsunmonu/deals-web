@@ -47,15 +47,22 @@ function clearLS() {
   } catch {}
 }
 
-export default function NearbyButton() {
+export default function NearbyButton({
+  className = "",
+  showClear = true,
+}: {
+  className?: string;
+  showClear?: boolean;
+}) {
   const router = useRouter();
   const sp = useSearchParams();
 
   const [coords, setCoords] = useState<Coords | null>(null);
   const [status, setStatus] = useState<"idle" | "loading" | "ok" | "error">("idle");
+  const [err, setErr] = useState<string | null>(null);
 
-  const sort = (sp.get("sort") || "").toLowerCase();
-  const isActive = sort === "nearby" && coords;
+  const sort = sp.get("sort") || "";
+  const radius = sp.get("r") || ""; // km radius (string)
 
   useEffect(() => {
     const saved = readLS();
@@ -67,35 +74,57 @@ export default function NearbyButton() {
 
   const label = useMemo(() => {
     if (status === "loading") return "Getting location…";
-    if (isActive) return "Using your location ✅";
-    return "📍 Nearby";
-  }, [status, isActive]);
+    if (sort === "nearby" && status === "ok" && coords) return "Using your location ✅";
+    return "Use my location";
+  }, [status, coords, sort]);
 
-  function goNearby(c: Coords) {
-    const qs = new URLSearchParams();
+  async function goNearby(c: Coords, r?: string) {
+    const lat = round(c.lat);
+    const lng = round(c.lng);
+
+    const qs = new URLSearchParams(sp.toString());
     qs.set("sort", "nearby");
-    qs.set("lat", String(round(c.lat)));
-    qs.set("lng", String(round(c.lng)));
+    qs.set("lat", String(lat));
+    qs.set("lng", String(lng));
+
+    // radius (optional)
+    if (r) qs.set("r", r);
+    else if (!qs.get("r")) qs.set("r", "5"); // default to 5km if empty
+
     router.push(`/explore?${qs.toString()}`);
   }
 
   function requestLocation() {
-    if (!("geolocation" in navigator)) return;
+    setErr(null);
+
+    if (!("geolocation" in navigator)) {
+      setStatus("error");
+      setErr("Geolocation not supported on this browser.");
+      return;
+    }
 
     setStatus("loading");
 
     navigator.geolocation.getCurrentPosition(
-      (pos) => {
+      async (pos) => {
         const c = { lat: pos.coords.latitude, lng: pos.coords.longitude };
         writeLS(c);
         setCoords(c);
         setStatus("ok");
-        goNearby(c);
+        await goNearby(c, radius || "5");
       },
-      () => {
+      (e) => {
         setStatus("error");
+        if (e.code === 1) setErr("Location permission denied.");
+        else if (e.code === 2) setErr("Location unavailable.");
+        else if (e.code === 3) setErr("Location request timed out.");
+        else setErr("Could not get your location.");
       },
-      { enableHighAccuracy: false, timeout: 12000 }
+      {
+        enableHighAccuracy: false,
+        timeout: 12000,
+        maximumAge: 1000 * 60 * 10,
+      }
     );
   }
 
@@ -103,35 +132,50 @@ export default function NearbyButton() {
     clearLS();
     setCoords(null);
     setStatus("idle");
-    router.push("/explore");
+    setErr(null);
+
+    // If currently in nearby mode, return to default explore
+    if (sort === "nearby") {
+      const qs = new URLSearchParams(sp.toString());
+      qs.delete("sort");
+      qs.delete("lat");
+      qs.delete("lng");
+      qs.delete("r");
+      const next = qs.toString();
+      router.push(next ? `/explore?${next}` : "/explore");
+    }
   }
 
   return (
-    <div className="flex items-center gap-2">
+    <div className={`flex flex-wrap items-center gap-2 ${className}`}>
       <button
         type="button"
         onClick={requestLocation}
         disabled={status === "loading"}
         className={[
-          "inline-flex items-center gap-2 rounded-full px-4 py-2 text-sm font-semibold shadow-sm ring-1 transition",
-          isActive
-            ? "bg-slate-900 text-white ring-slate-900"
-            : "bg-white text-slate-900 ring-slate-200 hover:bg-slate-50",
+          "rounded-full px-4 py-2 text-sm font-semibold shadow-sm ring-1 ring-slate-200 transition",
+          sort === "nearby" && status === "ok" && coords
+            ? "bg-white text-slate-900 hover:bg-slate-50"
+            : "bg-emerald-600 text-white hover:bg-emerald-700",
           status === "loading" ? "opacity-70 cursor-not-allowed" : "",
         ].join(" ")}
+        title="Use your location to rank nearby deals"
       >
-        {label}
+        📍 {label}
       </button>
 
-      {isActive ? (
+      {showClear && (status === "ok" || coords) ? (
         <button
           type="button"
           onClick={clearLocation}
-          className="rounded-full bg-white px-3 py-2 text-xs font-semibold text-slate-700 ring-1 ring-slate-200 hover:bg-slate-50"
+          className="rounded-full bg-white px-4 py-2 text-sm font-semibold text-slate-700 shadow-sm ring-1 ring-slate-200 hover:bg-slate-50"
+          title="Clear saved location"
         >
           Clear
         </button>
       ) : null}
+
+      {err ? <div className="w-full text-xs text-red-600">{err}</div> : null}
     </div>
   );
 }
