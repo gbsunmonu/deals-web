@@ -1,11 +1,11 @@
 // app/explore/ExploreClient.tsx
 "use client";
 
-import { useMemo, useState } from "react";
-import { useSearchParams } from "next/navigation";
+import { useEffect, useMemo, useState } from "react";
+import { usePathname, useSearchParams } from "next/navigation";
 import ExploreBanner from "./ExploreBanner";
 import ExploreGridClient from "./ExploreGridClient";
-import NearbyEmptyState from "./NearbyEmptyState";
+import { trackEvent } from "@/lib/track";
 
 type DealRow = {
   id: string;
@@ -35,8 +35,6 @@ export default function ExploreClient({
   deals?: DealRow[];
   bannerStats?: Partial<BannerStats> | null;
 }) {
-  const sp = useSearchParams();
-
   const safeDeals = Array.isArray(deals) ? deals : [];
 
   const safeBanner = useMemo(
@@ -47,6 +45,7 @@ export default function ExploreClient({
     [bannerStats?.activeDeals, bannerStats?.highestDiscountPct, safeDeals.length]
   );
 
+  // Search box
   const [q, setQ] = useState("");
 
   const filteredDeals = useMemo(() => {
@@ -61,15 +60,52 @@ export default function ExploreClient({
     });
   }, [q, safeDeals]);
 
-  // ✅ only show Nearby empty message when:
-  // - sort=nearby
-  // - has lat/lng in URL (NearbyButton puts them)
-  // - has r radius
-  // - results are empty (after filtering)
-  const sort = (sp.get("sort") || "").toLowerCase();
-  const hasCoords = !!sp.get("lat") && !!sp.get("lng");
-  const hasRadius = !!sp.get("r");
-  const showNearbyEmpty = sort === "nearby" && hasCoords && hasRadius && filteredDeals.length === 0;
+  // ✅ Tracking (Explore view)
+  const pathname = usePathname();
+  const sp = useSearchParams();
+
+  useEffect(() => {
+    const qs = sp?.toString();
+    const fullPath = qs ? `${pathname}?${qs}` : pathname;
+
+    const sort = sp?.get("sort") || "";
+    const lat = sp?.get("lat") || "";
+    const lng = sp?.get("lng") || "";
+    const radiusKm = sp?.get("radiusKm") || "";
+
+    trackEvent({
+      type: "EXPLORE_VIEW",
+      dedupe: true,
+      path: fullPath,
+      meta: {
+        sort,
+        lat,
+        lng,
+        radiusKm,
+      },
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pathname, sp?.toString()]);
+
+  // ✅ Tracking (Search typed) - debounce
+  useEffect(() => {
+    const term = q.trim();
+    if (!term) return;
+
+    const t = setTimeout(() => {
+      const qs = sp?.toString();
+      const fullPath = qs ? `${pathname}?${qs}` : pathname;
+
+      trackEvent({
+        type: "EXPLORE_SEARCH",
+        dedupe: false,
+        path: fullPath,
+        meta: { q: term },
+      });
+    }, 650);
+
+    return () => clearTimeout(t);
+  }, [q, pathname, sp]);
 
   return (
     <main className="mx-auto max-w-6xl px-4 py-8">
@@ -96,9 +132,6 @@ export default function ExploreClient({
           </button>
         ) : null}
       </div>
-
-      {/* ✅ Nearby empty-state w/ "Expand radius (count)" chips */}
-      {showNearbyEmpty ? <NearbyEmptyState /> : null}
 
       <ExploreGridClient deals={filteredDeals} />
     </main>

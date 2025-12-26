@@ -1,4 +1,3 @@
-// app/api/view/route.ts
 import { NextRequest, NextResponse } from "next/server";
 import prisma from "@/lib/prisma";
 import { randomUUID, createHash } from "crypto";
@@ -28,52 +27,71 @@ function ipHashFromReq(req: NextRequest) {
     req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
     req.headers.get("x-real-ip") ||
     "";
-  return ip ? sha256(ip) : null;
+  if (!ip) return null;
+  return sha256(ip);
 }
+
+const ALLOWED = new Set([
+  "EXPLORE_VIEW",
+  "EXPLORE_SEARCH",
+  "DEAL_VIEW",
+  "DEAL_REDEEM_CLICK",
+  "DEAL_REDEEM_SUCCESS",
+  "MERCHANT_PROFILE_VIEW",
+]);
 
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json().catch(() => ({}));
 
-    // Support both shapes:
-    // 1) { dealId }  (assume DEAL_VIEW)
-    // 2) { type, dealId, merchantId }
-    const type = String(body?.type || "DEAL_VIEW").toUpperCase();
-    const dealId = body?.dealId ? String(body.dealId) : null;
-    const merchantId = body?.merchantId ? String(body.merchantId) : null;
-
-    if (!dealId && !merchantId) {
-      return NextResponse.json(
-        { error: "Missing dealId or merchantId" },
-        { status: 400 }
-      );
+    const type = String(body?.type || "").trim().toUpperCase();
+    if (!ALLOWED.has(type)) {
+      return NextResponse.json({ error: "invalid_type" }, { status: 400 });
     }
 
-    // visitor cookie (anonymous persistent id)
-    let visitorId = req.cookies.get(VISITOR_COOKIE)?.value || "";
-    if (!visitorId || !isUuid(visitorId)) visitorId = randomUUID();
+    const path = String(body?.path || "").slice(0, 300) || null;
+    const dealId = body?.dealId ? String(body.dealId) : null;
+    const merchantId = body?.merchantId ? String(body.merchantId) : null;
+    const city = String(body?.city || "").slice(0, 120) || null;
 
-    // your existing device cookie (optional)
+    if (
+      (type === "DEAL_VIEW" || type === "DEAL_REDEEM_CLICK" || type === "DEAL_REDEEM_SUCCESS") &&
+      !dealId
+    ) {
+      return NextResponse.json({ error: "missing_dealId" }, { status: 400 });
+    }
+    if (type === "MERCHANT_PROFILE_VIEW" && !merchantId) {
+      return NextResponse.json({ error: "missing_merchantId" }, { status: 400 });
+    }
+
+    // visitor cookie
+    let vid = req.cookies.get(VISITOR_COOKIE)?.value || "";
+    if (!vid || !isUuid(vid)) vid = randomUUID();
+
+    // existing device cookie (optional)
     const deviceHash =
-      String(req.cookies.get("ytd_device")?.value || "").slice(0, 80) ||
-      "unknown";
+      String(req.cookies.get("ytd_device")?.value || "").slice(0, 80) || "unknown";
 
     const now = new Date();
     const day = dayStampUTC(now);
 
-    // dedupe per visitor/day/type/target
-    const target = dealId ? `deal:${dealId}` : `merchant:${merchantId}`;
-    const dayKey = `${type}:${visitorId}:${day}:${target}`.slice(0, 128);
+    const target =
+      type.startsWith("DEAL_") || type === "DEAL_VIEW"
+        ? `deal:${dealId || "none"}`
+        : type === "MERCHANT_PROFILE_VIEW"
+        ? `merchant:${merchantId || "none"}`
+        : `path:${path || "none"}`;
 
-    const path = req.headers.get("referer") || null;
+    const dayKey = `${type}:${vid}:${day}:${target}`.slice(0, 128);
+
     const ua = req.headers.get("user-agent") || null;
     const ipHash = ipHashFromReq(req);
 
-    // ✅ Upsert VisitorProfile (NO deviceHash here)
+    // ✅ upsert VisitorProfile by id (cookie value == primary key)
     await prisma.visitorProfile.upsert({
-      where: { id: visitorId },
+      where: { id: vid },
       create: {
-        id: visitorId,
+        id: vid,
         firstSeenAt: now,
         lastSeenAt: now,
         lastPath: path,
@@ -89,29 +107,30 @@ export async function POST(req: NextRequest) {
       select: { id: true },
     });
 
-    // ✅ Create Event (deviceHash belongs here)
+    // ✅ create event (dedup by dayKey unique)
     try {
       await prisma.event.create({
         data: {
+          dayKey,
           type: type as any,
           deviceHash,
-          dayKey,
-          visitorId,
+          visitorId: vid, // nullable in schema is OK
           dealId,
           merchantId,
+          city,
           userAgent: ua,
           ipHash,
         },
         select: { id: true },
       });
     } catch (e: any) {
-      // ignore unique duplicates on dayKey
+      // ignore unique dayKey duplicates
       if (e?.code !== "P2002") throw e;
     }
 
     const res = NextResponse.json({ ok: true });
 
-    res.cookies.set(VISITOR_COOKIE, visitorId, {
+    res.cookies.set(VISITOR_COOKIE, vid, {
       path: "/",
       sameSite: "lax",
       secure: process.env.NODE_ENV === "production",
@@ -121,7 +140,7 @@ export async function POST(req: NextRequest) {
 
     return res;
   } catch (e: any) {
-    console.error("/api/view error:", e);
+    console.error("api/track error:", e);
     return NextResponse.json(
       { error: "server_error", message: e?.message || "Unknown error" },
       { status: 500 }

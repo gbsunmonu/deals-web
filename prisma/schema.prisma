@@ -1,5 +1,3 @@
-// prisma/schema.prisma
-
 datasource db {
   provider  = "postgresql"
   url       = env("DATABASE_URL")
@@ -15,15 +13,26 @@ enum DiscountType {
   PERCENT
 }
 
+/**
+ * ✅ Single EventType enum (extends your existing one)
+ * IMPORTANT:
+ * - Do NOT define a second EventType enum anywhere else.
+ * - Keep existing values to match your DB.
+ */
 enum EventType {
   DEAL_VIEW
   MERCHANT_PROFILE_VIEW
+
+  // added (visitor tracking)
+  EXPLORE_VIEW
+  EXPLORE_SEARCH
+  DEAL_REDEEM_CLICK
+  DEAL_REDEEM_SUCCESS
 }
 
 model Merchant {
   id String @id @default(uuid()) @db.Uuid
 
-  // Link to Supabase auth user (nullable but unique)
   userId String? @unique @db.Uuid
 
   name        String
@@ -41,7 +50,6 @@ model Merchant {
 
   deals Deal[]
 
-  // ✅ opposite relation for Event.merchant
   events Event[]
 }
 
@@ -59,7 +67,6 @@ model Deal {
 
   imageUrl String?
 
-  // how many times the deal can be redeemed total (null/0 = unlimited)
   maxRedemptions Int?
 
   startsAt DateTime
@@ -73,7 +80,6 @@ model Deal {
   requestedBlockLogs RedemptionBlockLog[] @relation("RequestedDeal")
   blockedBlockLogs   RedemptionBlockLog[] @relation("BlockedDeal")
 
-  // ✅ opposite relation for Event.deal
   events Event[]
 
   createdAt DateTime @default(now())
@@ -91,7 +97,6 @@ model Redemption {
 
   redeemedAt DateTime?
 
-  // QR expiry (required)
   expiresAt DateTime
 
   deviceHash String?
@@ -134,21 +139,44 @@ model RedemptionBlockLog {
   @@map("RedemptionBlockLog")
 }
 
+/**
+ * ✅ NEW: persistent anonymous visitor profile
+ * We store the cookie UUID as VisitorProfile.id (simple and Prisma-friendly).
+ */
+model VisitorProfile {
+  id String @id @default(uuid()) @db.Uuid
+
+  firstSeenAt DateTime @default(now())
+  lastSeenAt  DateTime @default(now())
+
+  lastPath  String?
+  userAgent String?
+  ipHash    String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  events Event[]
+
+  @@index([lastSeenAt])
+  @@map("VisitorProfile")
+}
+
+/**
+ * ✅ Keep your EXISTING Event table/model, just add visitorId + optional metadata.
+ * NOTE: visitorId is optional so you can deploy safely even before backfill.
+ */
 model Event {
   id String @id @default(uuid()) @db.Uuid
 
   type EventType
-
-  /// Your existing cookie-based device value (keep if you want)
   deviceHash String
 
-  /// ✅ NEW: persistent anonymous user id
-  visitorId String @db.Uuid
-  visitor   VisitorProfile @relation(fields: [visitorId], references: [id], onDelete: Cascade)
-
-  /// ✅ Used for dedupe: unique per visitor/day/target/type
-  /// (Keep this: it prevents view spam while still counting unique daily viewers)
   dayKey String @unique @db.VarChar(128)
+
+  // ✅ NEW: visitor FK (nullable for safety)
+  visitorId String?         @db.Uuid
+  visitor   VisitorProfile? @relation(fields: [visitorId], references: [id], onDelete: SetNull)
 
   merchantId String?   @db.Uuid
   merchant   Merchant? @relation(fields: [merchantId], references: [id], onDelete: SetNull)
@@ -156,50 +184,17 @@ model Event {
   dealId String? @db.Uuid
   deal   Deal?   @relation(fields: [dealId], references: [id], onDelete: SetNull)
 
-  /// Optional metadata (super useful later)
-  city        String?
-  userAgent   String?
-  ipHash      String? // only if you decide to store hashed IP (optional)
+  city      String?
+  userAgent String?
+  ipHash    String?
 
   createdAt DateTime @default(now())
 
   @@index([type, createdAt])
-  @@index([visitorId, createdAt])
   @@index([deviceHash, createdAt])
+  @@index([visitorId, createdAt])
   @@index([merchantId, createdAt])
   @@index([dealId, createdAt])
   @@index([dayKey])
   @@map("Event")
-}
-
-model VisitorProfile {
-  /// Persistent anonymous ID (UUID string stored in cookie/localStorage)
-  id String @id @db.Uuid
-
-  firstSeenAt DateTime @default(now())
-  lastSeenAt  DateTime @default(now())
-
-  /// Optional enrichment (privacy-safe)
-  city        String?
-  region      String?
-  country     String?
-
-  /// Rounded location ONLY (recommended), e.g. 2-3 decimals
-  /// - 2 decimals ~ 1.1km
-  /// - 3 decimals ~ 110m
-  latRound Float?
-  lngRound Float?
-
-  /// Optional device fingerprint/hash if you still want it
-  deviceHash String?
-
-  /// If user later signs up, link them (optional)
-  userId String? @unique @db.Uuid
-
-  /// Relations
-  events Event[]
-
-  @@index([lastSeenAt])
-  @@index([city])
-  @@index([country])
 }
