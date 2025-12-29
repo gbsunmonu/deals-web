@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import NearbyButton from "./NearbyButton";
 
+
 type Props = {
   activeDeals?: number;
   highestDiscountPct?: number;

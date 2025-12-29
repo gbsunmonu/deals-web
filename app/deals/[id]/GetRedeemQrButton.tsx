@@ -1,46 +1,59 @@
 "use client";
 
-import { useMemo, useState } from "react";
-import { useRouter } from "next/navigation";
+import { useState } from "react";
+import { trackEvent } from "@/lib/track";
 
-type Props = {
+export default function GetRedeemQrButton({
+  dealId,
+  merchantId,
+}: {
   dealId: string;
-};
-
-export default function GetRedeemQrButton({ dealId }: Props) {
-  const router = useRouter();
+  merchantId?: string;
+}) {
   const [loading, setLoading] = useState(false);
+  const [qrUrl, setQrUrl] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
-  const canClick = useMemo(() => !loading && !!dealId, [loading, dealId]);
-
-  async function startRedeem() {
-    if (!canClick) return;
-
+  async function onClick() {
     setErr(null);
-    setLoading(true);
 
+    trackEvent({
+      type: "DEAL_REDEEM_CLICK",
+      dedupe: false,
+      dealId,
+      merchantId,
+      meta: { source: "deal_page_cta" },
+    });
+
+    setLoading(true);
     try {
-      const res = await fetch("/api/redeem/start", {
+      // TODO: replace with your real endpoint that creates the QR / redemption
+      const res = await fetch("/api/redeem", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        cache: "no-store",
         body: JSON.stringify({ dealId }),
       });
 
       const data = await res.json().catch(() => ({}));
 
-      if (!res.ok || !data?.shortCode) {
-        throw new Error(data?.error || "Could not generate QR. Try again.");
+      if (!res.ok) {
+        setErr(data?.error || "Could not generate QR.");
+        return;
       }
 
-      const shortCode = String(data.shortCode);
+      // expect something like { qrUrl: "..." }
+      const url = typeof data?.qrUrl === "string" ? data.qrUrl : null;
+      setQrUrl(url);
 
-      // ✅ send user straight to /r/[shortCode]
-      router.push(`/r/${encodeURIComponent(shortCode)}`);
-      router.refresh();
-    } catch (e: any) {
-      setErr(e?.message || "Something went wrong.");
+      trackEvent({
+        type: "DEAL_REDEEM_SUCCESS",
+        dedupe: false,
+        dealId,
+        merchantId,
+        meta: { source: "deal_page_cta" },
+      });
+    } catch {
+      setErr("Network error.");
     } finally {
       setLoading(false);
     }
@@ -48,29 +61,29 @@ export default function GetRedeemQrButton({ dealId }: Props) {
 
   return (
     <div className="space-y-3">
-      {err ? (
-        <div className="rounded-2xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800">
-          {err}
-        </div>
-      ) : null}
-
       <button
         type="button"
-        onClick={startRedeem}
-        disabled={!canClick}
+        onClick={onClick}
+        disabled={loading}
         className={[
-          "w-full rounded-full px-4 py-2 text-sm font-semibold shadow-sm transition",
-          !canClick
-            ? "cursor-not-allowed bg-slate-200 text-slate-500"
+          "rounded-full px-6 py-3 text-sm font-semibold shadow-sm transition",
+          loading
+            ? "bg-slate-200 text-slate-600"
             : "bg-emerald-600 text-white hover:bg-emerald-700",
         ].join(" ")}
       >
-        {loading ? "Generating QR…" : "Get QR to redeem"}
+        {loading ? "Generating…" : "Get QR / Claim deal →"}
       </button>
 
-      <p className="text-[11px] text-slate-500">
-        QR expires in 15 minutes. It’s locked to your device.
-      </p>
+      {err ? <div className="text-sm text-red-600">{err}</div> : null}
+
+      {qrUrl ? (
+        <div className="rounded-2xl border border-slate-200 bg-white p-4">
+          <p className="text-sm font-semibold text-slate-900">Your QR</p>
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img src={qrUrl} alt="QR code" className="mt-3 w-48" />
+        </div>
+      ) : null}
     </div>
   );
 }

@@ -1,9 +1,8 @@
-// components/ViewTracker.tsx
 "use client";
 
 import { useEffect } from "react";
 import { usePathname, useSearchParams } from "next/navigation";
-import { trackEvent, type TrackEventType } from "@/lib/track";
+import { trackEvent, TrackEventType } from "@/lib/track";
 
 export default function ViewTracker({
   type,
@@ -12,7 +11,7 @@ export default function ViewTracker({
   dedupe = true,
   meta,
 }: {
-  type: TrackEventType;          // ✅ fix: no more string
+  type: TrackEventType;
   dealId?: string | null;
   merchantId?: string | null;
   dedupe?: boolean;
@@ -22,20 +21,19 @@ export default function ViewTracker({
   const sp = useSearchParams();
 
   useEffect(() => {
-    // fullPath with query string
     const qs = sp?.toString();
     const fullPath = qs ? `${pathname}?${qs}` : pathname;
 
     trackEvent({
       type,
-      path: fullPath,
       dealId: dealId ?? undefined,
       merchantId: merchantId ?? undefined,
       dedupe,
+      path: fullPath,
       meta,
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [type, dealId, merchantId, dedupe, pathname, sp?.toString()]);
+  }, [type, dealId, merchantId, pathname, sp?.toString()]);
 
   return null;
 }

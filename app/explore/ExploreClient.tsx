@@ -1,10 +1,11 @@
 // app/explore/ExploreClient.tsx
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import { usePathname, useSearchParams } from "next/navigation";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { useSearchParams, usePathname } from "next/navigation";
 import ExploreBanner from "./ExploreBanner";
 import ExploreGridClient from "./ExploreGridClient";
+import ViewTracker from "@/components/ViewTracker";
 import { trackEvent } from "@/lib/track";
 
 type DealRow = {
@@ -45,7 +46,6 @@ export default function ExploreClient({
     [bannerStats?.activeDeals, bannerStats?.highestDiscountPct, safeDeals.length]
   );
 
-  // Search box
   const [q, setQ] = useState("");
 
   const filteredDeals = useMemo(() => {
@@ -53,62 +53,60 @@ export default function ExploreClient({
     if (!term) return safeDeals;
 
     return safeDeals.filter((d) => {
-      const hay = `${d.title} ${d.description ?? ""} ${d.merchant?.name ?? ""} ${
-        d.merchant?.city ?? ""
-      }`.toLowerCase();
+      const hay = `${d.title} ${d.description ?? ""} ${d.merchant?.name ?? ""} ${d.merchant?.city ?? ""}`.toLowerCase();
       return hay.includes(term);
     });
   }, [q, safeDeals]);
 
-  // ✅ Tracking (Explore view)
-  const pathname = usePathname();
+  // ✅ track EXPLORE_SEARCH (debounced)
   const sp = useSearchParams();
+  const pathname = usePathname();
+  const tRef = useRef<number | null>(null);
 
-  useEffect(() => {
-    const qs = sp?.toString();
-    const fullPath = qs ? `${pathname}?${qs}` : pathname;
-
-    const sort = sp?.get("sort") || "";
-    const lat = sp?.get("lat") || "";
-    const lng = sp?.get("lng") || "";
-    const radiusKm = sp?.get("radiusKm") || "";
-
-    trackEvent({
-      type: "EXPLORE_VIEW",
-      dedupe: true,
-      path: fullPath,
-      meta: {
-        sort,
-        lat,
-        lng,
-        radiusKm,
-      },
-    });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pathname, sp?.toString()]);
-
-  // ✅ Tracking (Search typed) - debounce
   useEffect(() => {
     const term = q.trim();
     if (!term) return;
 
-    const t = setTimeout(() => {
+    if (tRef.current) window.clearTimeout(tRef.current);
+    tRef.current = window.setTimeout(() => {
       const qs = sp?.toString();
       const fullPath = qs ? `${pathname}?${qs}` : pathname;
 
       trackEvent({
         type: "EXPLORE_SEARCH",
-        dedupe: false,
+        dedupe: false, // search should log each search
         path: fullPath,
-        meta: { q: term },
+        meta: {
+          q: term,
+          sort: sp?.get("sort") || "",
+          radiusKm: sp?.get("radiusKm") || "",
+          lat: sp?.get("lat") || "",
+          lng: sp?.get("lng") || "",
+          results: filteredDeals.length,
+        },
       });
-    }, 650);
+    }, 450);
 
-    return () => clearTimeout(t);
-  }, [q, pathname, sp]);
+    return () => {
+      if (tRef.current) window.clearTimeout(tRef.current);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [q]);
 
   return (
     <main className="mx-auto max-w-6xl px-4 py-8">
+      {/* ✅ EXPLORE_VIEW */}
+      <ViewTracker
+        type="EXPLORE_VIEW"
+        dedupe={true}
+        meta={{
+          sort: sp?.get("sort") || "",
+          radiusKm: sp?.get("radiusKm") || "",
+          lat: sp?.get("lat") || "",
+          lng: sp?.get("lng") || "",
+        }}
+      />
+
       <ExploreBanner
         activeDeals={safeBanner.activeDeals}
         highestDiscountPct={safeBanner.highestDiscountPct}

@@ -76,8 +76,14 @@ export default async function DealDetailPage({ params }: DealDetailPageProps) {
 
   return (
     <main className="mx-auto max-w-6xl px-4 py-4">
-      {/* ✅ Track deal view (deduped by device/day) */}
-      <ViewTracker type="DEAL_VIEW" dealId={deal.id} merchantId={deal.merchant.id} />
+      {/* ✅ Track deal view (deduped by visitor/day in /api/track) */}
+      <ViewTracker
+        type="DEAL_VIEW"
+        dealId={deal.id}
+        merchantId={deal.merchant.id}
+        dedupe={true}
+        meta={{ from: "deal_detail_page" }}
+      />
 
       {/* Breadcrumbs */}
       <nav className="mb-4 text-xs text-slate-500">
@@ -286,7 +292,6 @@ export default async function DealDetailPage({ params }: DealDetailPageProps) {
                 Open in Google Maps
               </a>
 
-              {/* ✅ NEW: merchant page */}
               <Link
                 href={`/m/${deal.merchant.id}`}
                 className="inline-flex items-center rounded-full border border-slate-200 px-3 py-1.5 font-semibold text-slate-700 hover:bg-slate-50"
@@ -313,7 +318,11 @@ export default async function DealDetailPage({ params }: DealDetailPageProps) {
             </p>
 
             <div className="mt-4">
-              <GetRedeemQrButton dealId={deal.id} />
+              {/* ✅ Pass merchantId so redeem events link to merchant too */}
+              <GetRedeemQrButton
+                dealId={deal.id}
+                merchantId={deal.merchant.id}
+              />
             </div>
           </section>
         </div>
