@@ -11,18 +11,14 @@ type CreateDealPayload = {
   description: string;
   originalPrice?: number | null;
 
-  // ✅ UI can send either discountValue OR discountPercent (we normalize)
   discountValue?: number | null;
   discountPercent?: number | null;
 
   imageUrl?: string | null;
 
-  // ✅ date-only strings: "2025-12-14"
-  // startDate can be omitted => defaults to today
   startDate?: string;
   endDate: string;
 
-  // ✅ null/undefined => unlimited
   maxRedemptions?: number | null;
 };
 
@@ -36,10 +32,7 @@ function clamp(n: number, min: number, max: number) {
   return Math.max(min, Math.min(max, n));
 }
 
-// Store dates with fixed time 11:59 (local-ish safe)
 function dateAt1159(dateStr: string) {
-  // Expect "YYYY-MM-DD"
-  // Make it UTC 11:59 to be consistent across servers:
   return new Date(`${dateStr}T11:59:00.000Z`);
 }
 
@@ -51,7 +44,6 @@ function todayIsoDateUTC() {
 
 export async function POST(req: NextRequest) {
   try {
-    // ✅ Require merchant session
     const supabase = await createSupabaseServer();
     const { data, error } = await supabase.auth.getUser();
 
@@ -73,19 +65,14 @@ export async function POST(req: NextRequest) {
 
     const originalPrice = toIntOrNull(body.originalPrice);
 
-    // ✅ normalize discount
     const rawDiscount =
       toIntOrNull(body.discountValue) ?? toIntOrNull(body.discountPercent) ?? 0;
     const discountValue = clamp(rawDiscount, 0, 100);
-
-    // If discountValue > 0 => PERCENT else NONE
     const discountType = discountValue > 0 ? "PERCENT" : "NONE";
 
     const imageUrl = body.imageUrl ? String(body.imageUrl).trim() : null;
 
-    // ✅ Start date defaults to today (no calendar needed for start)
     const startDate = (body.startDate && String(body.startDate).trim()) || todayIsoDateUTC();
-
     const endDate = String(body.endDate ?? "").trim();
     if (!endDate) {
       return NextResponse.json({ error: "endDate is required" }, { status: 400 });
@@ -105,12 +92,11 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // maxRedemptions: null => unlimited, 1 => one free item, 100 => 100 total, etc.
     const maxRedemptionsRaw = toIntOrNull(body.maxRedemptions);
     const maxRedemptions =
       maxRedemptionsRaw == null ? null : Math.max(1, maxRedemptionsRaw);
 
-    // ✅ Find merchant by userId (must exist)
+    // ✅ merchant lookup (no status gating until migration exists)
     const merchant = await prisma.merchant.findUnique({
       where: { userId: user.id },
       select: { id: true },

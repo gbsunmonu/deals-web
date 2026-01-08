@@ -72,24 +72,28 @@ export async function POST(req: NextRequest) {
     const ipHash = ipHashFromReq(req);
 
     // upsert visitor profile
-    await prisma.visitorProfile.upsert({
-      where: { id: visitorId },
-      create: {
-        id: visitorId,
-        firstSeenAt: now,
-        lastSeenAt: now,
-        lastPath: path,
-        userAgent: ua,
-        ipHash,
-      },
-      update: {
-        lastSeenAt: now,
-        lastPath: path,
-        userAgent: ua,
-        ipHash,
-      },
-      select: { id: true },
-    });
+   await prisma.visitorProfile.upsert({
+  where: { id: visitorId },
+  create: {
+    id: visitorId,
+    visitorId: visitorId, // ✅ REQUIRED by schema
+    firstSeenAt: now,
+    lastSeenAt: now,
+    lastPath: path,
+    userAgent: ua,
+    ipHash,
+  },
+  update: {
+    // keep visitorId consistent (optional but fine)
+    visitorId: visitorId,
+    lastSeenAt: now,
+    lastPath: path,
+    userAgent: ua,
+    ipHash,
+  },
+  select: { id: true },
+});
+
 
     // create event (ignore duplicates on dayKey)
     try {

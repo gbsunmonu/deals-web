@@ -1,51 +1,37 @@
 // lib/visitor.ts
-import { cookies, headers } from "next/headers";
-import { randomUUID, createHash } from "crypto";
+import { NextResponse } from "next/server";
+import { randomUUID } from "crypto";
 
 export const VISITOR_COOKIE = "go_vid_v1";
 
-function isUuid(v: string) {
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v);
-}
-
-function sha256(input: string) {
-  return createHash("sha256").update(input).digest("hex");
+/** Basic UUID v4/v5-ish validation */
+export function isUuid(v: string) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+    v
+  );
 }
 
 /**
- * ✅ Server-safe visitor id getter
- * - In Next 16 / RSC, cookies() can be async -> we await it.
+ * Read visitor cookie from a NextRequest-like cookie store.
+ * Works with NextRequest.cookies (Route Handlers).
  */
-export async function getVisitorIdRSC(): Promise<string> {
-  const cookieStore = await cookies();
-  const existing = cookieStore.get(VISITOR_COOKIE)?.value || "";
+export function getVisitorIdFromRequest(req: { cookies: { get: (k: string) => { value?: string } | undefined } }) {
+  const existing = req.cookies.get(VISITOR_COOKIE)?.value || "";
   if (existing && isUuid(existing)) return existing;
-
-  // fallback (rare): deterministic-ish id from headers
-  const h = await headers();
-  const ua = h.get("user-agent") || "";
-  const al = h.get("accept-language") || "";
-  const seed = `${ua}|${al}`;
-  const derived = sha256(seed).slice(0, 32);
-  // not a real UUID, so generate a real one
   return randomUUID();
 }
 
 /**
- * ✅ Route-handler helper: set the cookie if missing
+ * ✅ Set visitor cookie on a NextResponse (Route Handlers).
+ * This is the function your build message suggests you already have.
  */
-export async function ensureVisitorCookie(): Promise<string> {
-  const cookieStore = await cookies();
-  const existing = cookieStore.get(VISITOR_COOKIE)?.value || "";
-  if (existing && isUuid(existing)) return existing;
-
-  const id = randomUUID();
-  cookieStore.set(VISITOR_COOKIE, id, {
+export function setVisitorCookieOnResponse(res: NextResponse, visitorId: string) {
+  res.cookies.set(VISITOR_COOKIE, visitorId, {
     httpOnly: true,
     sameSite: "lax",
     secure: process.env.NODE_ENV === "production",
     path: "/",
-    maxAge: 60 * 60 * 24 * 365, // 1 year
+    maxAge: 60 * 60 * 24 * 365 * 2, // 2 years
   });
-  return id;
+  return res;
 }

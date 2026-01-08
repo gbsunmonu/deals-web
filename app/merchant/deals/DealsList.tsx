@@ -2,6 +2,7 @@
 
 import React from "react";
 import Link from "next/link";
+import { repostDealAction } from "./repost-action";
 
 type DealsListProps = {
   deals: any[];
@@ -82,10 +83,7 @@ export default function DealsList({ deals }: DealsListProps) {
             <span className="font-semibold text-slate-700">
               {filteredDeals.length}
             </span>{" "}
-            {filter === "ALL"
-              ? "deals"
-              : filter.toLowerCase() + " deals"}
-            .
+            {filter === "ALL" ? "deals" : filter.toLowerCase() + " deals"}.
           </p>
         </div>
       )}
@@ -116,12 +114,13 @@ export default function DealsList({ deals }: DealsListProps) {
 
           const discountedPrice =
             originalPrice && discountValue
-              ? originalPrice -
-                Math.round((originalPrice * discountValue) / 100)
+              ? originalPrice - Math.round((originalPrice * discountValue) / 100)
               : null;
 
           const startsAt = new Date(deal.startsAt);
           const endsAt = new Date(deal.endsAt);
+
+          const canRepost = deal.status === "ENDED";
 
           return (
             <article
@@ -183,21 +182,33 @@ export default function DealsList({ deals }: DealsListProps) {
               </div>
 
               {/* RIGHT: actions */}
-              <div className="flex flex-shrink-0 items-center gap-2 self-start sm:self-auto">
+              <div className="flex flex-shrink-0 flex-wrap items-center gap-2 self-start sm:self-auto">
                 <Link
                   href={`/merchant/deals/${deal.id}/edit`}
                   className="inline-flex items-center rounded-full border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-700 transition group-hover:border-slate-300 group-hover:bg-slate-50"
                 >
-                  Edit deal
+                  Edit
                 </Link>
 
-                {/* 👇 Changed: always go to /explore (no /id) to avoid 404 */}
                 <Link
                   href={`/explore`}
                   className="inline-flex items-center rounded-full border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-600 transition group-hover:border-slate-300 group-hover:bg-slate-50"
                 >
-                  View on Explore
+                  View Explore
                 </Link>
+
+                {/* ✅ NEW: Repost expired deal */}
+                {canRepost && (
+                  <form action={repostDealAction}>
+                    <input type="hidden" name="dealId" value={deal.id} />
+                    <button
+                      type="submit"
+                      className="inline-flex items-center rounded-full bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-700"
+                    >
+                      Repost
+                    </button>
+                  </form>
+                )}
               </div>
             </article>
           );

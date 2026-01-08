@@ -3,6 +3,7 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 import { createSupabaseServer } from "@/lib/supabase-server";
 import { prisma } from "@/lib/prisma";
+import RepostButton from "./RepostButton";
 
 export const dynamic = "force-dynamic";
 
@@ -21,38 +22,23 @@ function formatNaira(value: number | null | undefined) {
 }
 
 export default async function MerchantDealsPage() {
-  // ✅ Next.js 16: createSupabaseServer() is async
   const supabase = await createSupabaseServer();
-
   const {
     data: { user },
   } = await supabase.auth.getUser();
 
-  if (!user) {
-    redirect("/auth/sign-in?next=/merchant/deals");
-  }
+  if (!user) redirect("/auth/sign-in?next=/merchant/deals");
 
   const merchant = await prisma.merchant.findUnique({
     where: { userId: user.id },
   });
 
-  if (!merchant) {
-    redirect("/merchant/profile");
-  }
+  if (!merchant) redirect("/merchant/profile");
 
   const deals = await prisma.deal.findMany({
     where: { merchantId: merchant.id },
     orderBy: { startsAt: "desc" },
   });
-
-  console.log(
-    "[MyDeals] discounts:",
-    deals.map((d) => ({
-      id: d.id,
-      title: d.title,
-      discountValue: d.discountValue,
-    }))
-  );
 
   return (
     <main className="mx-auto max-w-6xl px-4 py-10">
@@ -111,7 +97,7 @@ export default async function MerchantDealsPage() {
                 className="flex flex-col gap-3 rounded-3xl border border-slate-200 bg-white px-5 py-4 shadow-sm md:flex-row md:items-center md:justify-between"
               >
                 <div className="min-w-0 flex-1 space-y-1">
-                  <div className="flex items-center gap-2">
+                  <div className="flex flex-wrap items-center gap-2">
                     <p className="truncate text-sm font-semibold text-slate-900">
                       {deal.title}
                     </p>
@@ -135,6 +121,11 @@ export default async function MerchantDealsPage() {
                     <span className="inline-flex items-center rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-semibold text-emerald-700">
                       {discount > 0 ? `${discount}% OFF` : "No discount set"}
                     </span>
+
+                    {/* ✅ Show Repost only when ended */}
+                    {status === "ENDED" ? (
+                      <RepostButton dealId={deal.id} />
+                    ) : null}
                   </div>
 
                   <p className="text-xs text-slate-500">

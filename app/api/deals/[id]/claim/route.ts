@@ -1,3 +1,4 @@
+// app/api/deals/[id]/claim/route.ts
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import type { Prisma } from "@prisma/client";
@@ -86,7 +87,10 @@ function isStillValid(expiresAt: Date | null | undefined, now: Date) {
   return expiresAt.getTime() > now.getTime();
 }
 
-export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
+export async function POST(
+  req: NextRequest,
+  ctx: { params: Promise<{ id: string }> }
+) {
   try {
     const { id: dealId } = await ctx.params;
 
@@ -114,8 +118,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
             deviceHash,
             activeKey: { not: null },
             redeemedAt: null,
-           expiresAt: { lte: now },
-
+            expiresAt: { lte: now },
           },
           data: { activeKey: null },
         });
@@ -163,17 +166,16 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
               ? Math.max(1, Math.ceil((soonest.expiresAt.getTime() - now.getTime()) / 1000))
               : QR_TTL_MINUTES * 60;
 
-            // ✅ Prisma uses camelCase fields
-            await tx.redemptionBlockLog.create({
+            // ✅ Log to TrackDropLog (model exists)
+            await tx.trackDropLog.create({
               data: {
-                deviceHash,
-                requestedDealId: dealId,
-                blockedDealId: soonest.dealId,
-                blockedShortCode: soonest.shortCode ?? null,
-                blockedExpiresAt: soonest.expiresAt ?? null,
                 reason: "ACTIVE_QR_EXISTS",
-                retryAfterSec,
+                type: "REDEEM_CLAIM",
+                deviceHash,
                 userAgent,
+                dealId,
+                // Optional extras
+                dayKey: activeKey,
               },
             });
 
@@ -206,13 +208,15 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
           if (ageMs < cooldownMs) {
             const retryAfterSec = Math.ceil((cooldownMs - ageMs) / 1000);
 
-            await tx.redemptionBlockLog.create({
+            // ✅ Log to TrackDropLog (model exists)
+            await tx.trackDropLog.create({
               data: {
-                deviceHash,
-                requestedDealId: dealId,
                 reason: "COOLDOWN",
-                retryAfterSec,
+                type: "REDEEM_CLAIM",
+                deviceHash,
                 userAgent,
+                dealId,
+                dayKey: activeKey,
               },
             });
 

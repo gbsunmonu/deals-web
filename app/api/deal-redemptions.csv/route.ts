@@ -1,7 +1,9 @@
 // app/api/deal-redemptions.csv/route.ts
-import { createClient } from '@supabase/supabase-js';
+import { NextRequest } from "next/server";
+import { createClient } from "@supabase/supabase-js";
+import { ADMIN_COOKIE, hashAdminPassword, safeEqual } from "@/lib/adminAuth";
 
-export const dynamic = 'force-dynamic';
+export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
 const supabase = createClient(
@@ -13,8 +15,18 @@ const supabase = createClient(
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
+function requireAdmin(req: NextRequest) {
+  const expectedPw = process.env.ADMIN_PASSWORD || "";
+  if (!expectedPw) return false;
+
+  const cookieVal = req.cookies.get(ADMIN_COOKIE)?.value || "";
+  if (!cookieVal) return false;
+
+  return safeEqual(cookieVal, hashAdminPassword(expectedPw));
+}
+
 function csvEscape(v: unknown) {
-  if (v === null || v === undefined) return '';
+  if (v === null || v === undefined) return "";
   const s = String(v);
   return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
@@ -26,29 +38,30 @@ function parseDateParam(v: string | null): string | null {
   const trimmed = v.trim();
   if (!trimmed) return null;
 
-  // If it's a date-only like 2025-11-01, convert to start/end of day in UTC where needed.
   const dateOnlyMatch = /^(\d{4})-(\d{2})-(\d{2})$/.exec(trimmed);
   if (dateOnlyMatch) {
-    // For "from", caller will pass as-is (00:00:00Z). For "to", caller should pass +1 day minus epsilon.
-    // We'll handle "to" below by detecting if time is missing and pushing to end-of-day.
-    // For now return 00:00:00Z and let caller decide.
-    return new Date(trimmed + 'T00:00:00Z').toISOString();
+    // 00:00:00Z for date-only
+    return `${trimmed}T00:00:00.000Z`;
   }
 
   const d = new Date(trimmed);
-  if (isNaN(d.getTime())) return null;
+  if (Number.isNaN(d.getTime())) return null;
   return d.toISOString();
 }
 
-export async function GET(req: Request) {
+export async function GET(req: NextRequest) {
   try {
-    const url = new URL(req.url);
-    const raw = (url.searchParams.get('id') || url.searchParams.get('code') || '').trim();
-    const merchantId = url.searchParams.get('merchantId') || undefined;
+    // ✅ Admin-only
+    if (!requireAdmin(req)) {
+      return new Response("Unauthorized", { status: 401 });
+    }
 
-    // New params
-    const fromParam = url.searchParams.get('from'); // accepts YYYY-MM-DD or ISO
-    const toParam = url.searchParams.get('to');     // accepts YYYY-MM-DD or ISO
+    const url = new URL(req.url);
+    const raw = (url.searchParams.get("id") || url.searchParams.get("code") || "").trim();
+    const merchantId = url.searchParams.get("merchantId") || undefined;
+
+    const fromParam = url.searchParams.get("from"); // YYYY-MM-DD or ISO
+    const toParam = url.searchParams.get("to");     // YYYY-MM-DD or ISO
 
     if (!raw) {
       return new Response('Missing ?id= (UUID) or ?code= (shortCode)', { status: 400 });
@@ -60,102 +73,86 @@ export async function GET(req: Request) {
       dealId = raw;
     } else {
       const { data: byCode, error: codeErr } = await supabase
-        .from('Deal')
-        .select('id')
-        .eq('shortCode', raw)
-        .limit(1);
-      if (codeErr) return new Response(`Error resolving code: ${codeErr.message}`, { status: 500 });
-      dealId = byCode?.[0]?.id ?? null;
+        .from("Deal")
+        .select("id")
+        .eq("shortCode", raw)
+        .maybeSingle();
+
+      if (codeErr) return new Response(codeErr.message, { status: 500 });
+      dealId = byCode?.id ?? null;
     }
 
-    if (!dealId) return new Response(`No deal found for "${raw}"`, { status: 404 });
+    if (!dealId) {
+      return new Response("Deal not found", { status: 404 });
+    }
 
-    // Load the deal (and optionally verify merchant)
-    const { data: dealRows, error: dealErr } = await supabase
-      .from('Deal')
-      .select('id, title, shortCode, merchantId')
-      .eq('id', dealId)
-      .limit(1);
-    if (dealErr) return new Response(`Error fetching deal: ${dealErr.message}`, { status: 500 });
+    // Parse date filters
+    let fromISO: string | null = parseDateParam(fromParam);
+    let toISO: string | null = parseDateParam(toParam);
 
-    const deal = dealRows?.[0];
-    if (!deal) return new Response('Deal not found', { status: 404 });
+    // If toParam was date-only, push to end of that day
+    if (toParam && /^\d{4}-\d{2}-\d{2}$/.test(toParam.trim())) {
+      const d = new Date(`${toParam.trim()}T00:00:00.000Z`);
+      d.setUTCDate(d.getUTCDate() + 1);
+      d.setUTCMilliseconds(d.getUTCMilliseconds() - 1);
+      toISO = d.toISOString();
+    }
+
+    if (fromParam && !fromISO) return new Response(`Invalid 'from' date: "${fromParam}"`, { status: 400 });
+    if (toParam && !toISO) return new Response(`Invalid 'to' date: "${toParam}"`, { status: 400 });
+
+    // Load deal
+    let dealQ = supabase
+      .from("Deal")
+      .select("id, shortCode, title, merchantId")
+      .eq("id", dealId)
+      .maybeSingle();
+
+    const { data: deal, error: dealErr } = await dealQ;
+    if (dealErr) return new Response(dealErr.message, { status: 500 });
+    if (!deal) return new Response("Deal not found", { status: 404 });
+
     if (merchantId && deal.merchantId !== merchantId) {
-      return new Response('Deal does not belong to the provided merchant', { status: 403 });
+      return new Response("Deal does not belong to merchantId", { status: 403 });
     }
 
-    // ----- Date range handling -----
-    let fromISO = parseDateParam(fromParam);
-    let toISO = parseDateParam(toParam);
+    // Load redemptions
+    let rQ = supabase
+      .from("Redemption")
+      .select("id, code, createdAt")
+      .eq("dealId", dealId)
+      .order("createdAt", { ascending: true });
 
-    // If user passed a date-only for "to", bump to end-of-day (exclusive upper bound):
-    // e.g., 2025-11-01 -> 2025-11-01T23:59:59.999Z (approx; we'll convert by adding 1 day at 00:00Z and treat as < next day)
-    if (toParam && /^\d{4}-\d{2}-\d{2}$/.test(toParam)) {
-      const d = new Date(toParam + 'T00:00:00Z');
-      if (!isNaN(d.getTime())) {
-        d.setUTCDate(d.getUTCDate() + 1); // next day 00:00Z
-        toISO = d.toISOString();
-      }
-    }
+    if (fromISO) rQ = rQ.gte("createdAt", fromISO);
+    if (toISO) rQ = rQ.lte("createdAt", toISO);
 
-    // If "from" or "to" were provided but invalid, return error
-    if (fromParam && !fromISO) {
-      return new Response(`Invalid 'from' date: "${fromParam}"`, { status: 400 });
-    }
-    if (toParam && !toISO) {
-      return new Response(`Invalid 'to' date: "${toParam}"`, { status: 400 });
-    }
+    const { data: rows, error: rErr } = await rQ;
+    if (rErr) return new Response(rErr.message, { status: 500 });
 
-    // Build query
-    let q = supabase
-      .from('Redemption')
-      .select('id, code, createdAt')
-      .eq('dealId', deal.id);
-
-    if (fromISO) q = q.gte('createdAt', fromISO);
-    if (toISO)   q = q.lt('createdAt', toISO); // exclusive upper bound
-
-    // Default order oldest first for CSV
-    q = q.order('createdAt', { ascending: true });
-
-    const { data: rows, error: rErr } = await q;
-    if (rErr) return new Response(`Error fetching redemptions: ${rErr.message}`, { status: 500 });
-
-    // CSV
-    const header = [
-      'redemption_id',
-      'deal_id',
-      'deal_short_code',
-      'deal_title',
-      'code',
-      'created_at',
-    ];
+    const header = ["deal_id", "deal_short_code", "deal_title", "code", "created_at"];
     const body = (rows ?? []).map((r) => [
-      csvEscape(r.id),
       csvEscape(deal.id),
       csvEscape(deal.shortCode),
       csvEscape(deal.title),
       csvEscape(r.code),
       csvEscape(r.createdAt),
     ]);
-    const csv = [header, ...body].map((row) => row.join(',')).join('\r\n') + '\r\n';
 
-    // Filename with optional range hint
+    const csv = [header, ...body].map((row) => row.join(",")).join("\r\n") + "\r\n";
+
     const rangeHint =
-      fromParam || toParam
-        ? `-${fromParam || 'start'}_to_${toParam || 'now'}`
-        : '';
+      fromParam || toParam ? `-${fromParam || "start"}_to_${toParam || "now"}` : "";
     const filename = `redemptions-${deal.shortCode || deal.id}${rangeHint}.csv`;
 
     return new Response(csv, {
       status: 200,
       headers: {
-        'Content-Type': 'text/csv; charset=utf-8',
-        'Content-Disposition': `attachment; filename="${filename}"`,
-        'Cache-Control': 'no-store',
+        "Content-Type": "text/csv; charset=utf-8",
+        "Content-Disposition": `attachment; filename="${filename}"`,
+        "Cache-Control": "no-store",
       },
     });
   } catch (err: any) {
-    return new Response(err?.message || 'Unexpected error', { status: 500 });
+    return new Response(err?.message || "Unexpected error", { status: 500 });
   }
 }

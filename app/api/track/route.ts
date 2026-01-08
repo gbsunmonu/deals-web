@@ -1,134 +1,142 @@
 // app/api/track/route.ts
 import { NextRequest, NextResponse } from "next/server";
-import { prisma } from "@/lib/prisma";
-import { ensureVisitorCookie } from "@/lib/visitor";
-import { createHash } from "crypto";
+import prisma from "@/lib/prisma";
+import { randomUUID, createHash } from "crypto";
+import { VISITOR_COOKIE } from "@/lib/visitor";
 
 export const dynamic = "force-dynamic";
+
+function isUuid(s: string) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+    s
+  );
+}
 
 function sha256(input: string) {
   return createHash("sha256").update(input).digest("hex");
 }
 
-function dayStamp(d = new Date()) {
-  // YYYY-MM-DD in UTC (stable)
-  return d.toISOString().slice(0, 10);
+function dayStampUTC(d: Date) {
+  const yyyy = d.getUTCFullYear();
+  const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const dd = String(d.getUTCDate()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd}`;
 }
 
-function safeStr(v: unknown, max = 500) {
-  if (typeof v !== "string") return null;
-  const s = v.trim();
-  if (!s) return null;
-  return s.length > max ? s.slice(0, max) : s;
-}
-
-function safeId(v: unknown) {
-  const s = safeStr(v, 80);
-  return s || null;
-}
-
-// we keep deviceHash because your Event model requires it
-function deviceHashFromReq(req: NextRequest) {
-  const ua = req.headers.get("user-agent") || "";
-  const al = req.headers.get("accept-language") || "";
-  // simple stable hash (not PII stored raw)
-  return sha256(`${ua}|${al}`).slice(0, 32);
-}
-
-export async function POST(req: NextRequest) {
-  const now = new Date();
-
-  const vid = await ensureVisitorCookie();
-
-  const ua = req.headers.get("user-agent") || null;
-
-  // Optional: hash IP if you want (behind proxies this can be tricky)
-  // We'll keep it conservative: only hash if header exists.
+function ipHashFromReq(req: NextRequest) {
   const ip =
     req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
     req.headers.get("x-real-ip") ||
     "";
-  const ipHash = ip ? sha256(ip).slice(0, 32) : null;
+  return ip ? sha256(ip) : null;
+}
 
-  let body: any = {};
+export async function POST(req: NextRequest) {
   try {
-    body = await req.json();
-  } catch {
-    // allow empty body
-  }
+    const body = await req.json().catch(() => ({}));
 
-  const type = safeStr(body?.type, 80);
-  if (!type) {
-    return NextResponse.json({ ok: false, error: "Missing type" }, { status: 400 });
-  }
+    const rawType = String(body?.type || "").trim();
+    const type = (rawType || "EXPLORE_VIEW").toUpperCase();
 
-  const path = safeStr(body?.path, 300);
-  const dealId = safeId(body?.dealId);
-  const merchantId = safeId(body?.merchantId);
-  const dedupe = Boolean(body?.dedupe);
+    const dealId = body?.dealId ? String(body.dealId) : null;
+    const merchantId = body?.merchantId ? String(body.merchantId) : null;
 
-  const meta =
-    body?.meta && typeof body.meta === "object" && !Array.isArray(body.meta)
-      ? body.meta
-      : null;
+    const path =
+      (body?.path ? String(body.path) : null) ||
+      req.headers.get("referer") ||
+      null;
 
-  // ✅ daily dedupe key (unique)
-  // visitor + date + type + target + path
-  const keySeed = [
-    dayStamp(now),
-    vid,
-    type,
-    dealId || "",
-    merchantId || "",
-    path || "",
-  ].join("|");
+    const city = body?.city ? String(body.city) : null;
 
-  const dayKey = sha256(keySeed).slice(0, 64);
+    const meta =
+      body?.meta && typeof body.meta === "object" && !Array.isArray(body.meta)
+        ? body.meta
+        : null;
 
-  // ✅ upsert profile (VisitorProfile.id == visitor UUID)
-  await prisma.visitorProfile.upsert({
-    where: { id: vid as any },
-    create: {
-      id: vid as any,
-      firstSeenAt: now,
-      lastSeenAt: now,
-      lastPath: path,
-      userAgent: ua,
-      ipHash,
-    },
-    update: {
-      lastSeenAt: now,
-      lastPath: path,
-      userAgent: ua,
-      ipHash,
-    },
-  });
+    // Visitor cookie (UUID string)
+    let visitorCookie = req.cookies.get(VISITOR_COOKIE)?.value || "";
+    if (!visitorCookie || !isUuid(visitorCookie)) visitorCookie = randomUUID();
 
-  const deviceHash = deviceHashFromReq(req);
+    const deviceHash =
+      String(req.cookies.get("ytd_device")?.value || "").slice(0, 80) ||
+      "unknown";
 
-  // ✅ create event (dedupe uses unique dayKey)
-  try {
-    await prisma.event.create({
-      data: {
-        type: type as any,
-        deviceHash,
-        dayKey,
-        visitorId: vid as any,
-        dealId: dealId as any,
-        merchantId: merchantId as any,
+    const now = new Date();
+    const day = dayStampUTC(now);
+
+    const target = dealId
+      ? `deal:${dealId}`
+      : merchantId
+      ? `merchant:${merchantId}`
+      : "none";
+
+    const dayKey = `${type}:${visitorCookie}:${day}:${target}`.slice(0, 128);
+
+    const ua = req.headers.get("user-agent") || null;
+    const ipHash = ipHashFromReq(req);
+
+    // ✅ VisitorProfile:
+    // - id is UUID in DB
+    // - visitorId maps to visitor_id (TEXT NOT NULL)
+    await prisma.visitorProfile.upsert({
+      where: { id: visitorCookie },
+      create: {
+        id: visitorCookie,
+        visitorId: visitorCookie, // maps to visitor_id (NOT NULL)
+        firstSeenAt: now,
+        lastSeenAt: now,
+        lastPath: path,
         userAgent: ua,
         ipHash,
-        ...(path ? { city: null } : {}),
       },
+      update: {
+        visitorId: visitorCookie,
+        lastSeenAt: now,
+        lastPath: path,
+        userAgent: ua,
+        ipHash,
+      },
+      select: { id: true },
     });
-  } catch (e: any) {
-    // If dedupe enabled, ignore unique collisions for dayKey
-    if (dedupe) {
-      return NextResponse.json({ ok: true, deduped: true }, { status: 200 });
-    }
-    // otherwise still don’t break user
-    return NextResponse.json({ ok: true, warn: "event_insert_failed" }, { status: 200 });
-  }
 
-  return NextResponse.json({ ok: true }, { status: 200 });
+    // ✅ Event.visitorId is uuid in DB, so pass the UUID string (Prisma treats it as UUID)
+    try {
+      await prisma.event.create({
+        data: {
+          type: type as any,
+          deviceHash,
+          dayKey,
+          visitorId: visitorCookie,
+          dealId,
+          merchantId,
+          city: city ?? null,
+          userAgent: ua,
+          ipHash,
+          meta: meta ?? undefined,
+        },
+        select: { id: true },
+      });
+    } catch (e: any) {
+      // Ignore duplicates on dayKey unique constraint
+      if (e?.code !== "P2002") throw e;
+    }
+
+    const res = NextResponse.json({ ok: true });
+
+    res.cookies.set(VISITOR_COOKIE, visitorCookie, {
+      path: "/",
+      sameSite: "lax",
+      secure: process.env.NODE_ENV === "production",
+      httpOnly: true,
+      maxAge: 60 * 60 * 24 * 365 * 2,
+    });
+
+    return res;
+  } catch (e: any) {
+    console.error("/api/track error:", e);
+    return NextResponse.json(
+      { error: "server_error", message: e?.message || "Unknown error" },
+      { status: 500 }
+    );
+  }
 }

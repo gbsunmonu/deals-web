@@ -1,82 +1,118 @@
 // app/api/deals/create/route.ts
-import { NextRequest, NextResponse } from "next/server";
+import { NextRequest } from "next/server";
 import prisma from "@/lib/prisma";
-import { getServerSupabaseRSC } from "@/lib/supabase";
+import { createClient } from "@supabase/supabase-js";
 
 export const dynamic = "force-dynamic";
-export const revalidate = 0;
 
-export async function POST(req: NextRequest) {
+function parseDate(v: any) {
+  const d = new Date(v);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+function toInt(v: any) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return null;
+  return Math.trunc(n);
+}
+
+function clamp(n: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, n));
+}
+
+export async function POST(request: NextRequest): Promise<Response> {
   try {
-    const body = await req.json();
+    // Verify merchant auth via Supabase (server-side)
+    const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
+    const supabaseAnon = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
+    const supabase = createClient(supabaseUrl, supabaseAnon, {
+      auth: { persistSession: false },
+    });
 
-    const {
-      title,
-      description,
-      originalPrice,
-      discountValue,
-      startsAt,
-      endsAt,
-      imageUrl,
-    } = body;
+    const accessToken =
+      request.headers.get("authorization")?.replace("Bearer ", "") ||
+      request.cookies.get("sb-access-token")?.value ||
+      "";
 
-    // ✅ Basic validation
-    if (!title) {
-      return NextResponse.json(
-        { error: "Title is required" },
-        { status: 400 }
-      );
+    if (!accessToken) {
+      return new Response(JSON.stringify({ error: "unauthorized" }), {
+        status: 401,
+        headers: { "content-type": "application/json" },
+      });
     }
 
-    if (!startsAt || !endsAt) {
-      return NextResponse.json(
-        { error: "Start and end dates are required" },
-        { status: 400 }
-      );
+    const { data: userRes, error: userErr } = await supabase.auth.getUser(
+      accessToken
+    );
+
+    if (userErr || !userRes?.user) {
+      return new Response(JSON.stringify({ error: "unauthorized" }), {
+        status: 401,
+        headers: { "content-type": "application/json" },
+      });
     }
 
-    // ✅ Auth: make sure we know which merchant is creating this deal
-    const supabase = await getServerSupabaseRSC();
-    const {
-      data: { user },
-    } = await supabase.auth.getUser();
+    const user = userRes.user;
 
-    if (!user) {
-      return NextResponse.json(
-        { error: "Not authenticated" },
-        { status: 401 }
-      );
-    }
-
-    // Find merchant by supabase userId
-    const merchant = await prisma.merchant.findUnique({
+    // Find merchant linked to this user
+    const merchant = await prisma.merchant.findFirst({
       where: { userId: user.id },
+      select: { id: true },
     });
 
     if (!merchant) {
-      return NextResponse.json(
-        { error: "No merchant profile found for this user" },
-        { status: 400 }
-      );
+      return new Response(JSON.stringify({ error: "merchant_not_found" }), {
+        status: 404,
+        headers: { "content-type": "application/json" },
+      });
     }
 
-    // ✅ Normalise description so it is never null
-    const safeDescription: string =
-      typeof description === "string" && description.trim().length > 0
-        ? description
-        : "";
+    const body = await request.json().catch(() => ({}));
 
-    // ✅ Normalise number fields
-    let numericOriginal: number | null = null;
-    if (originalPrice !== undefined && originalPrice !== null && originalPrice !== "") {
-      const n = Number(originalPrice);
-      numericOriginal = Number.isNaN(n) ? null : n;
+    const title = String(body?.title ?? "").trim();
+    const description = String(body?.description ?? "").trim();
+    const imageUrl = body?.imageUrl ? String(body.imageUrl).trim() : null;
+
+    const originalPriceRaw = body?.originalPrice ?? null;
+    const discountValueRaw = body?.discountValue ?? 0;
+
+    const startsAt = parseDate(body?.startsAt) ?? new Date();
+    const endsAt =
+      parseDate(body?.endsAt) ??
+      new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+
+    if (!title || title.length < 3) {
+      return new Response(JSON.stringify({ error: "invalid_title" }), {
+        status: 400,
+        headers: { "content-type": "application/json" },
+      });
+    }
+    if (!description || description.length < 5) {
+      return new Response(JSON.stringify({ error: "invalid_description" }), {
+        status: 400,
+        headers: { "content-type": "application/json" },
+      });
     }
 
-    let numericDiscount = 0;
-    if (discountValue !== undefined && discountValue !== null && discountValue !== "") {
-      const n = Number(discountValue);
-      numericDiscount = Number.isNaN(n) ? 0 : n;
+    // sanitize sizes
+    const safeDescription = description.slice(0, 2000);
+    const numericOriginal =
+      originalPriceRaw === null ? null : toInt(originalPriceRaw);
+
+    const discountValueParsed = toInt(discountValueRaw) ?? 0;
+    const discountValue = clamp(discountValueParsed, 0, 100);
+
+    // ✅ REQUIRED BY PRISMA SCHEMA
+    // If discountValue is > 0, treat as percent discount.
+    // If 0, there is no discount.
+    const discountType: "PERCENT" | "NONE" =
+      discountValue > 0 ? "PERCENT" : "NONE";
+
+    if (endsAt <= startsAt) {
+      return new Response(JSON.stringify({ error: "invalid_date_range" }), {
+        status: 400,
+        headers: { "content-type": "application/json" },
+      });
     }
 
     const deal = await prisma.deal.create({
@@ -84,21 +120,31 @@ export async function POST(req: NextRequest) {
         title,
         description: safeDescription,
         originalPrice: numericOriginal,
-        discountValue: numericDiscount,
-        // discountType will use the default (NONE) from the schema
-        startsAt: new Date(startsAt),
-        endsAt: new Date(endsAt),
-        imageUrl: imageUrl?.trim() || null,
+        discountValue,
+        discountType,
+        startsAt,
+        endsAt,
+        imageUrl,
         merchantId: merchant.id,
+      },
+      select: {
+        id: true,
+        title: true,
+        startsAt: true,
+        endsAt: true,
+        merchantId: true,
       },
     });
 
-    return NextResponse.json({ deal }, { status: 201 });
-  } catch (err) {
-    console.error("[CREATE DEAL] error:", err);
-    return NextResponse.json(
-      { error: "Failed to create deal" },
-      { status: 500 }
+    return new Response(JSON.stringify({ ok: true, deal }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  } catch (e: any) {
+    console.error("/api/deals/create error:", e);
+    return new Response(
+      JSON.stringify({ error: "server_error", message: e?.message ?? String(e) }),
+      { status: 500, headers: { "content-type": "application/json" } }
     );
   }
 }

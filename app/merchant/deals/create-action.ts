@@ -1,68 +1,95 @@
-// deals-web/app/merchant/deals/create-action.ts
+// app/merchant/deals/create-action.ts
 "use server";
 
 import { redirect } from "next/navigation";
-import prisma from "../../../utils/prismaClient";
-import { getCurrentMerchant } from "../../../utils/current-merchant";
+import prisma from "@/lib/prisma";
+import { cookies } from "next/headers";
+import { createClient } from "@supabase/supabase-js";
 
-function toNumber(value: FormDataEntryValue | null, fallback = 0): number {
-  const n = typeof value === "string" ? Number(value) : NaN;
-  return Number.isFinite(n) ? n : fallback;
+function toInt(v: FormDataEntryValue | null) {
+  if (v === null) return 0;
+  const n = Number(String(v));
+  if (!Number.isFinite(n)) return 0;
+  return Math.trunc(n);
+}
+
+function toDate(v: FormDataEntryValue | null) {
+  const s = v ? String(v) : "";
+  const d = new Date(s);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+function clamp(n: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, n));
+}
+
+async function getMerchantUserId(): Promise<string | null> {
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || "";
+  const supabaseAnon = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || "";
+  if (!supabaseUrl || !supabaseAnon) return null;
+
+  const jar = await cookies();
+  const accessToken = jar.get("sb-access-token")?.value || "";
+  if (!accessToken) return null;
+
+  const supabase = createClient(supabaseUrl, supabaseAnon, {
+    auth: { persistSession: false },
+  });
+
+  const { data, error } = await supabase.auth.getUser(accessToken);
+  if (error || !data?.user) return null;
+
+  return data.user.id;
 }
 
 export async function createDealAction(formData: FormData) {
-  // 1. Find the merchant that belongs to the logged-in user
-  const merchant = await getCurrentMerchant();
+  // 1) Validate merchant auth
+  const userId = await getMerchantUserId();
+  if (!userId) redirect("/auth/sign-in?next=/merchant/deals/new");
 
-  if (!merchant) {
-    throw new Error("You must be signed in as a merchant to create a deal.");
-  }
+  // 2) Find merchant linked to this user
+  const merchant = await prisma.merchant.findFirst({
+    where: { userId },
+    select: { id: true },
+  });
 
-  // 2. Read form fields
-  const title = String(formData.get("title") ?? "").trim();
-  const description = String(formData.get("description") ?? "").trim();
+  if (!merchant) redirect("/merchant/profile/edit");
 
-  const originalPrice = toNumber(formData.get("originalPrice"));
-  const discountPercent = toNumber(formData.get("discountPercent"));
+  // 3) Read + validate fields
+  const title = String(formData.get("title") || "").trim();
+  const description = String(formData.get("description") || "").trim();
 
-  const startsAtRaw = (formData.get("startsAt") as string) ?? "";
-  const endsAtRaw = (formData.get("endsAt") as string) ?? "";
+  const originalPrice = clamp(toInt(formData.get("originalPrice")), 0, 1_000_000_000);
+  const discountValue = clamp(toInt(formData.get("discountValue")), 0, 100);
 
-  const imageUrl =
-    (formData.get("imageUrl") as string | null | undefined) ?? null;
+  const startsAt = toDate(formData.get("startsAt")) ?? new Date();
+  const endsAt =
+    toDate(formData.get("endsAt")) ?? new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
 
-  // 3. Basic validation (you can extend this as you like)
-  if (!title) {
-    throw new Error("Title is required");
-  }
+  const imageUrlRaw = formData.get("imageUrl");
+  const imageUrl = imageUrlRaw ? String(imageUrlRaw).trim() : null;
 
-  if (!startsAtRaw || !endsAtRaw) {
-    throw new Error("Start and end dates are required");
-  }
+  if (!title || title.length < 3) throw new Error("Title is required");
+  if (!description || description.length < 5) throw new Error("Description is required");
+  if (endsAt <= startsAt) throw new Error("End date must be after start date");
 
-  const startsAt = new Date(startsAtRaw);
-  const endsAt = new Date(endsAtRaw);
+  // ✅ REQUIRED by Prisma schema
+  const discountType: "PERCENT" | "NONE" = discountValue > 0 ? "PERCENT" : "NONE";
 
-  // discountValue = how much money is taken off
-  const discountValue = Math.round((originalPrice * discountPercent) / 100);
-
-  // 4. Create the deal, **attaching the correct merchantId**
+  // 4) Create deal
   await prisma.deal.create({
     data: {
       title,
       description,
       originalPrice,
       discountValue,
+      discountType,
       startsAt,
       endsAt,
       imageUrl,
-      merchantId: merchant.id, // 👈 THIS is the key line
+      merchantId: merchant.id,
     },
   });
 
-  // 5. Go back to the merchant's My deals page
   redirect("/merchant/deals");
 }
-
-// Optional: keep the old name if your form imports `createDeal` instead
-export { createDealAction as createDeal };

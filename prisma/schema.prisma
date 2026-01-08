@@ -1,3 +1,4 @@
+// prisma/schema.prisma
 datasource db {
   provider  = "postgresql"
   url       = env("DATABASE_URL")
@@ -13,61 +14,65 @@ enum DiscountType {
   PERCENT
 }
 
-/**
- * ✅ Single EventType enum (extends your existing one)
- * IMPORTANT:
- * - Do NOT define a second EventType enum anywhere else.
- * - Keep existing values to match your DB.
- */
 enum EventType {
   DEAL_VIEW
   MERCHANT_PROFILE_VIEW
-
-  // added (visitor tracking)
   EXPLORE_VIEW
   EXPLORE_SEARCH
   DEAL_REDEEM_CLICK
   DEAL_REDEEM_SUCCESS
+  WHATSAPP_CLICK
+}
+
+enum MerchantStatus {
+  PENDING
+  VERIFIED
+  SUSPENDED
 }
 
 model Merchant {
   id String @id @default(uuid()) @db.Uuid
 
-  userId String? @unique @db.Uuid
-
   name        String
   description String?
   avatarUrl   String?
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
-  category    String?
-  address     String?
-  city        String?
-  phone       String?
-  website     String?
-  lat         Float?
-  lng         Float?
 
-  deals Deal[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
+  category String?
+  address  String?
+  city     String?
+  phone    String?
+  website  String?
+  lat      Float?
+  lng      Float?
+
+  userId String? @unique
+
+  whatsappNumber String? @map("whatsapp_number")
+
+  status          MerchantStatus @default(PENDING)
+  verifiedAt      DateTime?
+  statusReason    String?
+  statusUpdatedAt DateTime @default(now())
+
+  deals  Deal[]
   events Event[]
+
+  @@map("Merchant")
 }
 
 model Deal {
-  id          String @id @default(uuid()) @db.Uuid
+  id String @id @default(uuid()) @db.Uuid
+
   title       String
   description String
 
-  originalPrice Int?
-
-  shortCode String? @unique
-
-  discountValue Int          @default(0)
-  discountType  DiscountType @default(NONE)
+  discountValue Int
+  discountType  DiscountType
 
   imageUrl String?
-
-  maxRedemptions Int?
 
   startsAt DateTime
   endsAt   DateTime
@@ -75,15 +80,25 @@ model Deal {
   merchantId String   @db.Uuid
   merchant   Merchant @relation(fields: [merchantId], references: [id])
 
-  redemptions Redemption[]
-
-  requestedBlockLogs RedemptionBlockLog[] @relation("RequestedDeal")
-  blockedBlockLogs   RedemptionBlockLog[] @relation("BlockedDeal")
-
-  events Event[]
-
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+
+  originalPrice Int?
+  shortCode     String? @unique
+  maxRedemptions Int?
+
+  repostedFromId String? @db.Uuid
+  repostedFrom   Deal?   @relation("DealReposts", fields: [repostedFromId], references: [id], onDelete: SetNull)
+  reposts        Deal[]  @relation("DealReposts")
+
+  redemptions Redemption[]
+  events      Event[]
+
+  @@index([merchantId, createdAt])
+  @@index([startsAt, endsAt])
+  @@index([repostedFromId])
+
+  @@map("Deal")
 }
 
 model Redemption {
@@ -96,8 +111,7 @@ model Redemption {
   shortCode String @unique
 
   redeemedAt DateTime?
-
-  expiresAt DateTime
+  expiresAt  DateTime
 
   deviceHash String?
   activeKey  String? @unique
@@ -108,93 +122,91 @@ model Redemption {
   @@index([dealId])
   @@index([dealId, redeemedAt])
   @@index([expiresAt])
+
+  @@map("Redemption")
 }
 
-model RedemptionBlockLog {
-  id String @id @default(uuid()) @db.Uuid
+model VisitorProfile {
+  // DB: VisitorProfile.id is uuid
+  id String @id @db.Uuid
+
+  // DB requires visitor_id NOT NULL (text)
+  visitorId String @unique @map("visitor_id")
+
+  firstSeenAt DateTime @default(now()) @map("first_seen_at")
+  lastSeenAt  DateTime @default(now()) @map("last_seen_at")
+
+  lastPath  String? @map("last_path")
+  userAgent String? @map("user_agent")
+  ipHash    String? @map("ip_hash")
 
   createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
 
-  deviceHash String @map("device_hash")
-
-  requestedDealId String @map("requested_deal_id") @db.Uuid
-  requestedDeal   Deal   @relation("RequestedDeal", fields: [requestedDealId], references: [id], onDelete: Cascade)
-
-  blockedDealId String? @map("blocked_deal_id") @db.Uuid
-  blockedDeal   Deal?   @relation("BlockedDeal", fields: [blockedDealId], references: [id], onDelete: SetNull)
-
-  blockedShortCode String?   @map("blocked_short_code")
-  blockedExpiresAt DateTime? @map("blocked_expires_at")
-
-  reason String
-
-  retryAfterSec Int?    @map("retry_after_sec")
-  userAgent     String? @map("user_agent")
-
-  @@index([createdAt])
-  @@index([deviceHash])
-  @@index([requestedDealId])
-  @@index([blockedDealId])
-  @@index([reason])
-  @@map("RedemptionBlockLog")
-}
-
-/**
- * ✅ NEW: persistent anonymous visitor profile
- * We store the cookie UUID as VisitorProfile.id (simple and Prisma-friendly).
- */
-model VisitorProfile {
-  id String @id @default(uuid()) @db.Uuid
-
-  firstSeenAt DateTime @default(now())
-  lastSeenAt  DateTime @default(now())
-
-  lastPath  String?
-  userAgent String?
-  ipHash    String?
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
+  // ✅ now has an opposite field in Event
   events Event[]
 
-  @@index([lastSeenAt])
   @@map("VisitorProfile")
 }
 
-/**
- * ✅ Keep your EXISTING Event table/model, just add visitorId + optional metadata.
- * NOTE: visitorId is optional so you can deploy safely even before backfill.
- */
 model Event {
   id String @id @default(uuid()) @db.Uuid
 
   type EventType
+
   deviceHash String
 
+  merchantId String? @db.Uuid
+  dealId     String? @db.Uuid
+
+  createdAt DateTime @default(now())
+
   dayKey String @unique @db.VarChar(128)
+  meta   Json?
 
-  // ✅ NEW: visitor FK (nullable for safety)
-  visitorId String?         @db.Uuid
-  visitor   VisitorProfile? @relation(fields: [visitorId], references: [id], onDelete: SetNull)
+  // DB: Event.visitorId is uuid (and matches VisitorProfile.id)
+  visitorId String? @db.Uuid
 
-  merchantId String?   @db.Uuid
-  merchant   Merchant? @relation(fields: [merchantId], references: [id], onDelete: SetNull)
-
-  dealId String? @db.Uuid
-  deal   Deal?   @relation(fields: [dealId], references: [id], onDelete: SetNull)
+  // ✅ opposite relation field
+  visitor VisitorProfile? @relation(fields: [visitorId], references: [id], onDelete: SetNull)
 
   city      String?
   userAgent String?
   ipHash    String?
 
-  createdAt DateTime @default(now())
+  merchant Merchant? @relation(fields: [merchantId], references: [id], onDelete: SetNull)
+  deal     Deal?     @relation(fields: [dealId], references: [id], onDelete: SetNull)
 
   @@index([type, createdAt])
   @@index([deviceHash, createdAt])
   @@index([visitorId, createdAt])
   @@index([merchantId, createdAt])
   @@index([dealId, createdAt])
-  @@index([dayKey])
+
   @@map("Event")
+}
+
+model TrackDropLog {
+  id String @id @default(uuid()) @db.Uuid
+  createdAt DateTime @default(now())
+
+  reason String
+
+  type       String?
+  visitorId  String?
+  deviceHash String?
+  ipHash     String?
+  userAgent  String?
+  path       String?
+
+  dealId     String?
+  merchantId String?
+
+  dayKey String?
+
+  @@index([createdAt])
+  @@index([reason, createdAt])
+  @@index([type, createdAt])
+
+  @@map("TrackDropLog")
 }

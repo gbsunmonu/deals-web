@@ -2,6 +2,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { createSupabaseRouteClient } from "@/lib/supabase-route";
+import crypto from "crypto";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -20,11 +21,8 @@ type Body = {
 
   imageUrl?: string | null;
 
-  // date-only from client
   startDate?: string; // "YYYY-MM-DD"
   endDate?: string; // "YYYY-MM-DD"
-
-  // new flag (safe if old clients don’t send)
   startNow?: boolean;
 
   inventoryMode?: InventoryMode;
@@ -36,12 +34,10 @@ function isValidYYYYMMDD(s: string) {
 }
 
 function startOfDayUTC(dateYYYYMMDD: string) {
-  // 00:00:00.000Z
   return new Date(`${dateYYYYMMDD}T00:00:00.000Z`);
 }
 
 function endOfDayUTC(dateYYYYMMDD: string) {
-  // 23:59:59.999Z
   return new Date(`${dateYYYYMMDD}T23:59:59.999Z`);
 }
 
@@ -52,11 +48,12 @@ function clampInt(n: any, fallback = 0) {
 }
 
 function makeShortCode(len = 6) {
-  return Math.random().toString(36).slice(2, 2 + len).toUpperCase();
+  // crypto-safe
+  return crypto.randomBytes(8).toString("base64url").replace(/[-_]/g, "").toUpperCase().slice(0, len);
 }
 
 async function generateUniqueDealShortCode() {
-  for (let i = 0; i < 6; i++) {
+  for (let i = 0; i < 10; i++) {
     const code = makeShortCode(6);
     const exists = await prisma.deal.findUnique({
       where: { shortCode: code },
@@ -69,7 +66,6 @@ async function generateUniqueDealShortCode() {
 
 export async function POST(req: NextRequest) {
   try {
-    // ✅ auth (merchant session)
     const supabase = await createSupabaseRouteClient();
     const {
       data: { user },
@@ -91,7 +87,7 @@ export async function POST(req: NextRequest) {
     if (!title) return NextResponse.json({ error: "Title is required" }, { status: 400 });
     if (!description) return NextResponse.json({ error: "Description is required" }, { status: 400 });
 
-    // ✅ find merchant profile by Supabase userId (this is the cleanest mapping)
+    // ✅ merchant lookup (no status gating until migration exists)
     const merchant = await prisma.merchant.findFirst({
       where: { userId: user.id },
       select: { id: true },
@@ -104,29 +100,22 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // ✅ pricing/discount
     const originalPrice =
       body.originalPrice === null || body.originalPrice === undefined
         ? null
         : clampInt(body.originalPrice, 0);
 
     const discountValue = clampInt(body.discountValue, 0);
-    const discountType: DiscountType =
-      discountValue > 0 ? "PERCENT" : "NONE";
-
-    // ✅ image
+    const discountType: DiscountType = discountValue > 0 ? "PERCENT" : "NONE";
     const imageUrl = body.imageUrl ? String(body.imageUrl).trim() : null;
 
-    // ✅ dates
     const startNow = Boolean(body.startNow);
 
     let startsAt: Date;
     let endsAt: Date;
 
     if (startNow) {
-      // start immediately
       startsAt = new Date();
-      // still require endDate
       if (!body.endDate || !isValidYYYYMMDD(body.endDate)) {
         return NextResponse.json(
           { error: "Valid endDate (YYYY-MM-DD) is required" },
@@ -147,10 +136,6 @@ export async function POST(req: NextRequest) {
           { status: 400 }
         );
       }
-
-      // IMPORTANT FIX:
-      // If you used 23:59 as the start time, deals won’t appear in Explore until night.
-      // So we use start-of-day for startDate.
       startsAt = startOfDayUTC(body.startDate);
       endsAt = endOfDayUTC(body.endDate);
     }
@@ -166,7 +151,6 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // ✅ inventory
     const inventoryMode: InventoryMode = (body.inventoryMode ?? "UNLIMITED") as InventoryMode;
 
     let maxRedemptions: number | null = null;
@@ -176,10 +160,10 @@ export async function POST(req: NextRequest) {
     } else if (inventoryMode === "ONE") {
       maxRedemptions = 1;
     } else {
-      // LIMITED
-      const m = body.maxRedemptions === null || body.maxRedemptions === undefined
-        ? NaN
-        : clampInt(body.maxRedemptions, NaN as any);
+      const m =
+        body.maxRedemptions === null || body.maxRedemptions === undefined
+          ? NaN
+          : clampInt(body.maxRedemptions, NaN as any);
 
       if (!Number.isFinite(m) || m <= 0) {
         return NextResponse.json(

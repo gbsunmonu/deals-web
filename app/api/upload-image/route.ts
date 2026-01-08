@@ -1,17 +1,65 @@
 // app/api/upload-image/route.ts
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
+import crypto from "crypto";
+import { prisma } from "@/lib/prisma";
+import { createSupabaseRouteClient } from "@/lib/supabase-route";
 
 // Explicitly use Node runtime
 export const runtime = "nodejs";
 
-const supabase = createClient(
+const supabaseAdmin = createClient(
   process.env.SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!
+  process.env.SUPABASE_SERVICE_ROLE_KEY!,
+  { auth: { persistSession: false } }
 );
+
+const MAX_BYTES = 5 * 1024 * 1024; // 5MB
+const ALLOWED_MIME = new Set([
+  "image/png",
+  "image/jpeg",
+  "image/webp",
+  "image/gif",
+]);
+
+function safeExtFromMime(mime: string) {
+  switch (mime) {
+    case "image/png":
+      return "png";
+    case "image/jpeg":
+      return "jpg";
+    case "image/webp":
+      return "webp";
+    case "image/gif":
+      return "gif";
+    default:
+      return "bin";
+  }
+}
 
 export async function POST(req: NextRequest) {
   try {
+    // ✅ Require merchant auth
+    const supabase = await createSupabaseRouteClient();
+    const { data: userRes } = await supabase.auth.getUser();
+    const user = userRes.user;
+
+    if (!user) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
+    const merchant = await prisma.merchant.findUnique({
+      where: { userId: user.id },
+      select: { id: true },
+    });
+
+    if (!merchant) {
+      return NextResponse.json(
+        { error: "Forbidden: merchant not found" },
+        { status: 403 }
+      );
+    }
+
     const formData = await req.formData();
     const file = formData.get("file");
 
@@ -22,22 +70,36 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Use only ArrayBuffer – NO Buffer
+    if (!ALLOWED_MIME.has(file.type)) {
+      return NextResponse.json(
+        { error: `Unsupported file type: ${file.type}` },
+        { status: 400 }
+      );
+    }
+
+    if (file.size > MAX_BYTES) {
+      return NextResponse.json(
+        { error: "File too large (max 5MB)" },
+        { status: 400 }
+      );
+    }
+
     const bytes = await file.arrayBuffer();
 
-    const ext = file.name.split(".").pop() || "png";
-    const fileName = `${Date.now()}-${Math.random()
-      .toString(36)
-      .slice(2)}.${ext}`;
+    // ✅ Crypto-safe filename (no Math.random)
+    const ext = safeExtFromMime(file.type);
+    const fileName = `deal-images/${merchant.id}/${Date.now()}-${crypto
+      .randomBytes(16)
+      .toString("hex")}.${ext}`;
 
-    const { error: uploadError } = await supabase.storage
-      .from("deal-images") // 👈 bucket name
+    const { error: uploadError } = await supabaseAdmin.storage
+      .from("deal-images")
       .upload(fileName, bytes, {
-        contentType: file.type || "image/png",
+        contentType: file.type,
+        upsert: false,
       });
 
     if (uploadError) {
-      console.error("Supabase upload error:", uploadError);
       return NextResponse.json(
         { error: uploadError.message },
         { status: 500 }
@@ -46,7 +108,7 @@ export async function POST(req: NextRequest) {
 
     const {
       data: { publicUrl },
-    } = supabase.storage.from("deal-images").getPublicUrl(fileName);
+    } = supabaseAdmin.storage.from("deal-images").getPublicUrl(fileName);
 
     return NextResponse.json({ publicUrl }, { status: 200 });
   } catch (err: any) {

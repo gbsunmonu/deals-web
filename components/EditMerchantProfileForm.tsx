@@ -1,7 +1,8 @@
 // components/EditMerchantProfileForm.tsx
 "use client";
 
-import { saveMerchantProfileAction } from "@/app/merchant/profile/edit/actions";
+import { updateMerchantProfileAction } from "@/app/merchant/profile/edit/actions";
+
 
 type MerchantFormData = {
   name: string;
@@ -20,7 +21,7 @@ type Props = {
 export default function EditMerchantProfileForm({ merchant }: Props) {
   return (
     <form
-      action={saveMerchantProfileAction}
+      action={ updateMerchantProfileAction } 
       className="space-y-4 rounded-2xl border border-gray-200 bg-white p-5 shadow-sm"
     >
       <h1 className="text-xl font-semibold text-gray-900">

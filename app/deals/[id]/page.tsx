@@ -4,6 +4,9 @@ import Link from "next/link";
 import prisma from "@/lib/prisma";
 import GetRedeemQrButton from "./GetRedeemQrButton";
 import ViewTracker from "@/components/ViewTracker";
+// add import
+import WhatsAppButton from "@/components/WhatsAppButton";
+
 
 type DealDetailPageProps = {
   params: Promise<{ id: string }>;
@@ -29,6 +32,7 @@ export default async function DealDetailPage({ params }: DealDetailPageProps) {
           address: true,
           phone: true,
           website: true,
+           whatsappNumber: true, // ✅ ADD
         },
       },
     },
@@ -290,6 +294,16 @@ export default async function DealDetailPage({ params }: DealDetailPageProps) {
                 className="inline-flex items-center rounded-full bg-black px-3 py-1.5 font-semibold text-white hover:bg-slate-900"
               >
                 Open in Google Maps
+                {/* ✅ NEW: WhatsApp */}
+  {deal.merchant.whatsappNumber ? (
+    <WhatsAppButton
+      whatsappNumber={deal.merchant.whatsappNumber}
+      merchantName={deal.merchant.name}
+      dealTitle={deal.title}
+      dealId={deal.id}
+      merchantId={deal.merchant.id}
+    />
+  ) : null}
               </a>
 
               <Link
